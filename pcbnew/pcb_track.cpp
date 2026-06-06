@@ -592,6 +592,15 @@ bool PCB_VIA::Deserialize( const google::protobuf::Any &aContainer )
 
     SetViaType( FromProtoEnum<VIATYPE>( via.type() ) );
     UnpackNet( via.net() );
+
+    // Mirror interactive placement (drawing_tool.cpp): a via that carries an explicit net
+    // must be "free" (net-locked) so the connectivity engine does not absorb it into an
+    // overlapping zone/plane it happens to sit on before that zone is refilled with an
+    // antipad.  The PCB_VIA constructor defaults m_isFree=false (unlike the s-expr loader,
+    // which defaults true), so without this an API-created through-via dropped onto a filled
+    // GND/PWR plane silently loses its signal net to the plane net -- shorting the signal.
+    SetIsFree( GetNetCode() > 0 );
+
     SetLocked( via.locked() == kiapi::common::types::LockedState::LS_LOCKED );
 
     if( via.has_teardrop() )
