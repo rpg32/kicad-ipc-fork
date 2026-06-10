@@ -19,6 +19,43 @@
 
 syntax = "proto3";
 
-package kiapi.schematic.types;
+package kiapi.schematic.commands;
 
+import "common/types/base_types.proto";
 
+// Requests a list of nets in the schematic
+message GetNets
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+message NetInfo
+{
+  string name = 1;
+  int32  code = 2;
+}
+
+message GetNetsResponse
+{
+  repeated NetInfo nets = 1;
+}
+
+// Requests the sheet hierarchy
+message GetSheetHierarchy
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+}
+
+message SheetInfo
+{
+  string                    path     = 1;
+  string                    name     = 2;
+  string                    filename = 3;
+  string                    page     = 4;
+  kiapi.common.types.KIID   id       = 5;
+}
+
+message GetSheetHierarchyResponse
+{
+  repeated SheetInfo sheets = 1;
+}

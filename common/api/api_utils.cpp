@@ -53,6 +53,22 @@ KICOMMON_API std::optional<KICAD_T> TypeNameFromAny( const google::protobuf::Any
         { "type.googleapis.com/kiapi.board.types.Group", PCB_GROUP_T },
         { "type.googleapis.com/kiapi.board.types.Field", PCB_FIELD_T },
         { "type.googleapis.com/kiapi.board.types.FootprintInstance", PCB_FOOTPRINT_T },
+        // Schematic types
+        { "type.googleapis.com/kiapi.schematic.types.Line", SCH_LINE_T },
+        { "type.googleapis.com/kiapi.schematic.types.LocalLabel", SCH_LABEL_T },
+        { "type.googleapis.com/kiapi.schematic.types.GlobalLabel", SCH_GLOBAL_LABEL_T },
+        { "type.googleapis.com/kiapi.schematic.types.HierarchicalLabel", SCH_HIER_LABEL_T },
+        { "type.googleapis.com/kiapi.schematic.types.DirectiveLabel", SCH_DIRECTIVE_LABEL_T },
+        { "type.googleapis.com/kiapi.schematic.types.Junction", SCH_JUNCTION_T },
+        { "type.googleapis.com/kiapi.schematic.types.NoConnect", SCH_NO_CONNECT_T },
+        { "type.googleapis.com/kiapi.schematic.types.SchematicText", SCH_TEXT_T },
+        { "type.googleapis.com/kiapi.schematic.types.SchematicSymbol", SCH_SYMBOL_T },
+        { "type.googleapis.com/kiapi.schematic.types.SchematicField", SCH_FIELD_T },
+        { "type.googleapis.com/kiapi.schematic.types.BusEntry", SCH_BUS_WIRE_ENTRY_T },
+        { "type.googleapis.com/kiapi.schematic.types.SchematicShape", SCH_SHAPE_T },
+        { "type.googleapis.com/kiapi.schematic.types.SchematicTextBox", SCH_TEXTBOX_T },
+        { "type.googleapis.com/kiapi.schematic.types.Sheet", SCH_SHEET_T },
+        { "type.googleapis.com/kiapi.schematic.types.SheetPin", SCH_SHEET_PIN_T },
     };
 
     auto it = s_types.find( aMessage.type_url() );
