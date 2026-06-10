@@ -659,3 +659,46 @@ static struct SCH_BUS_ENTRY_DESC
                     &SCH_BUS_ENTRY_BASE::SetBusEntryColor, &SCH_BUS_ENTRY_BASE::GetBusEntryColor ) );
     }
 } _SCH_BUS_ENTRY_DESC;
+
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
+
+void SCH_BUS_WIRE_ENTRY::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::BusEntry msg;
+    msg.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *msg.mutable_position(), GetPosition() );
+    kiapi::common::PackVector2( *msg.mutable_size(), m_size );
+    msg.set_is_bus( false );
+    aContainer.PackFrom( msg );
+}
+
+bool SCH_BUS_WIRE_ENTRY::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::BusEntry msg;
+    if( !aContainer.UnpackTo( &msg ) ) return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( msg.position() ) );
+    m_size = kiapi::common::UnpackVector2( msg.size() );
+    return true;
+}
+
+void SCH_BUS_BUS_ENTRY::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::BusEntry msg;
+    msg.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *msg.mutable_position(), GetPosition() );
+    kiapi::common::PackVector2( *msg.mutable_size(), m_size );
+    msg.set_is_bus( true );
+    aContainer.PackFrom( msg );
+}
+
+bool SCH_BUS_BUS_ENTRY::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::BusEntry msg;
+    if( !aContainer.UnpackTo( &msg ) ) return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( msg.position() ) );
+    m_size = kiapi::common::UnpackVector2( msg.size() );
+    return true;
+}

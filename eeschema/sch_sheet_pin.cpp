@@ -430,3 +430,26 @@ static struct SCH_SHEET_PIN_DESC
         propMgr.InheritsAfter( TYPE_HASH( SCH_SHEET_PIN ), TYPE_HASH( SCH_HIERLABEL ) );
     }
 } _SCH_SHEET_PIN_DESC;
+
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
+
+void SCH_SHEET_PIN::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::SheetPin msg;
+    msg.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *msg.mutable_position(), GetPosition() );
+    msg.set_name( GetText().ToStdString() );
+    msg.set_side( static_cast<int>( GetSide() ) );
+    aContainer.PackFrom( msg );
+}
+
+bool SCH_SHEET_PIN::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::SheetPin msg;
+    if( !aContainer.UnpackTo( &msg ) ) return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( msg.position() ) );
+    SetText( wxString::FromUTF8( msg.name() ) );
+    return true;
+}

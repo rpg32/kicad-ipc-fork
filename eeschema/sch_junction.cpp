@@ -32,6 +32,8 @@
 #include <geometry/geometry_utils.h>
 #include <sch_painter.h>
 #include <sch_junction.h>
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
 #include <sch_edit_frame.h>
 #include <sch_connection.h>
 #include <schematic.h>
@@ -365,6 +367,30 @@ double SCH_JUNCTION::Similarity( const SCH_ITEM& aOther ) const
     return similarity;
 }
 
+
+
+void SCH_JUNCTION::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::Junction junction;
+    junction.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *junction.mutable_position(), m_pos );
+    junction.set_diameter( m_diameter );
+    aContainer.PackFrom( junction );
+}
+
+
+bool SCH_JUNCTION::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::Junction junction;
+
+    if( !aContainer.UnpackTo( &junction ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( junction.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( junction.position() ) );
+    m_diameter = junction.diameter();
+    return true;
+}
 
 static struct SCH_JUNCTION_DESC
 {

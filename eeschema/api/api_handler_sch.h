@@ -23,6 +23,8 @@
 
 #include <api/api_handler_editor.h>
 #include <api/common/commands/editor_commands.pb.h>
+#include <api/schematic/schematic_commands.pb.h>
+#include <google/protobuf/empty.pb.h>
 #include <kiid.h>
 
 using namespace kiapi;
@@ -66,6 +68,39 @@ protected:
 private:
     HANDLER_RESULT<commands::GetOpenDocumentsResponse> handleGetOpenDocuments(
             const HANDLER_CONTEXT<commands::GetOpenDocuments>& aCtx );
+
+    HANDLER_RESULT<commands::GetItemsResponse> handleGetItems(
+            const HANDLER_CONTEXT<commands::GetItems>& aCtx );
+
+    HANDLER_RESULT<commands::SelectionResponse> handleGetSelection(
+            const HANDLER_CONTEXT<commands::GetSelection>& aCtx );
+
+    HANDLER_RESULT<commands::SelectionResponse> handleAddToSelection(
+            const HANDLER_CONTEXT<commands::AddToSelection>& aCtx );
+
+    HANDLER_RESULT<commands::SelectionResponse> handleRemoveFromSelection(
+            const HANDLER_CONTEXT<commands::RemoveFromSelection>& aCtx );
+
+    HANDLER_RESULT<::google::protobuf::Empty> handleClearSelection(
+            const HANDLER_CONTEXT<commands::ClearSelection>& aCtx );
+
+    HANDLER_RESULT<commands::RunActionResponse> handleRunAction(
+            const HANDLER_CONTEXT<commands::RunAction>& aCtx );
+
+    HANDLER_RESULT<::google::protobuf::Empty> handleSaveDocument(
+            const HANDLER_CONTEXT<commands::SaveDocument>& aCtx );
+
+    HANDLER_RESULT<::google::protobuf::Empty> handleRevertDocument(
+            const HANDLER_CONTEXT<commands::RevertDocument>& aCtx );
+
+    HANDLER_RESULT<commands::SavedDocumentResponse> handleSaveDocumentToString(
+            const HANDLER_CONTEXT<commands::SaveDocumentToString>& aCtx );
+
+    HANDLER_RESULT<kiapi::schematic::commands::GetNetsResponse> handleGetNets(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::GetNets>& aCtx );
+
+    HANDLER_RESULT<kiapi::schematic::commands::GetSheetHierarchyResponse> handleGetSheetHierarchy(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::GetSheetHierarchy>& aCtx );
 
     SCH_EDIT_FRAME* m_frame;
 };

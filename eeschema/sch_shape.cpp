@@ -623,3 +623,23 @@ static struct SCH_SHAPE_DESC
 } _SCH_SHAPE_DESC;
 
 ENUM_TO_WXANY( FILL_T );
+
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
+
+void SCH_SHAPE::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::SchematicShape msg;
+    msg.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *msg.mutable_position(), GetPosition() );
+    aContainer.PackFrom( msg );
+}
+
+bool SCH_SHAPE::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::SchematicShape msg;
+    if( !aContainer.UnpackTo( &msg ) ) return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( msg.position() ) );
+    return true;
+}

@@ -42,6 +42,8 @@
 #include "sim/sim_lib_mgr.h"
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
 
 static const std::vector<KICAD_T> labelTypes = { SCH_LABEL_LOCATE_ANY_T };
 
@@ -1697,6 +1699,32 @@ wxString SCH_FIELD::getUnescapedText( const SCH_SHEET_PATH* aPath, const wxStrin
     return retv;
 }
 
+
+
+void SCH_FIELD::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::SchematicField field;
+    field.mutable_id()->set_value( m_Uuid.AsStdString() );
+    field.set_name( GetName().ToStdString() );
+    field.set_text( GetText().ToStdString() );
+    kiapi::common::PackVector2( *field.mutable_position(), GetPosition() );
+    field.set_visible( IsVisible() );
+    aContainer.PackFrom( field );
+}
+
+
+bool SCH_FIELD::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::SchematicField field;
+    if( !aContainer.UnpackTo( &field ) )
+        return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( field.id().value() );
+    SetName( wxString::FromUTF8( field.name() ) );
+    SetText( wxString::FromUTF8( field.text() ) );
+    SetPosition( kiapi::common::UnpackVector2( field.position() ) );
+    SetVisible( field.visible() );
+    return true;
+}
 
 static struct SCH_FIELD_DESC
 {
