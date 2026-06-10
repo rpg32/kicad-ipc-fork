@@ -1235,7 +1235,7 @@ add_subdirectory( pcb_calculator )
 add_subdirectory( plugins )             # 3D plugins must be built before kicad
 add_subdirectory( cvpcb )               # must be after pcbnew
 add_subdirectory( kicad )               # should follow pcbnew, eeschema, api
-add_subdirectory( tools )
+#add_subdirectory( tools )
 add_subdirectory( utils )
 
 if( KICAD_BUILD_QA_TESTS )
