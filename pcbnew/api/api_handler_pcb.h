@@ -159,6 +159,8 @@ private:
 
     HANDLER_RESULT<Empty> handleRefillZones( const HANDLER_CONTEXT<RefillZones>& aCtx );
 
+    HANDLER_RESULT<RouteTrackResponse> handleRouteTrack( const HANDLER_CONTEXT<RouteTrack>& aCtx );
+
     HANDLER_RESULT<commands::SavedDocumentResponse> handleSaveDocumentToString(
                 const HANDLER_CONTEXT<commands::SaveDocumentToString>& aCtx );
 
