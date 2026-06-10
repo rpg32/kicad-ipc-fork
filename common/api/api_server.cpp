@@ -37,6 +37,11 @@
 
 #include <api/common/envelope.pb.h>
 
+#ifdef __WINDOWS__
+#include <nng/nng.h>
+#include <nng/protocol/reqrep0/req.h>
+#endif
+
 #ifdef __UNIX__
 #include <sys/file.h>
 #endif
@@ -92,7 +97,61 @@ void KICAD_API_SERVER::Start()
         return;
     }
 
-#ifndef __WINDOWS__
+#ifdef __WINDOWS__
+    // On Windows, NNG IPC uses named pipes which don't create filesystem entries.
+    // socket.Exists() always returns false, so we probe the socket by attempting a
+    // quick client connection.  If it succeeds, another KiCad instance already owns it.
+    {
+        bool socketInUse = false;
+        std::string probeUrl = fmt::format( "ipc://{}", socket.GetFullPath().ToStdString() );
+        nng_socket probeSocket;
+
+        if( nng_req0_open( &probeSocket ) == 0 )
+        {
+            nng_dialer dialer;
+
+            if( nng_dialer_create( &dialer, probeSocket, probeUrl.c_str() ) == 0 )
+            {
+                if( nng_dialer_start( dialer, NNG_FLAG_NONBLOCK ) == 0 )
+                {
+                    // Brief wait for the async connect to complete
+                    nng_msleep( 200 );
+
+                    // Try to send a minimal message — if it goes through, something is listening
+                    nng_msg* msg;
+
+                    if( nng_msg_alloc( &msg, 0 ) == 0 )
+                    {
+                        nng_socket_set_ms( probeSocket, NNG_OPT_SENDTIMEO, 500 );
+
+                        if( nng_sendmsg( probeSocket, msg, 0 ) == 0 )
+                        {
+                            socketInUse = true;
+                            wxLogTrace( traceApi, wxString::Format(
+                                "Server: socket %s is already in use by another instance",
+                                socket.GetFullPath() ) );
+                        }
+                        else
+                        {
+                            nng_msg_free( msg );
+                        }
+                    }
+                }
+            }
+
+            nng_close( probeSocket );
+        }
+
+        if( socketInUse )
+        {
+            socket.SetFullName(
+                    wxString::Format( wxS( "api-%lu.sock" ), ::wxGetProcessId() ) );
+
+            wxLogTrace( traceApi, wxString::Format(
+                "Server: falling back to PID socket %s", socket.GetFullPath() ) );
+        }
+    }
+#else
     // We use non-abstract sockets because macOS and some other non-Linux platforms don't support
     // abstract sockets, which means there might be an old socket to unlink.  In order to try to
     // recover this, we lock a file (which will be unlocked on process exit) and if we get the lock,
@@ -110,7 +169,6 @@ void KICAD_API_SERVER::Start()
             wxRemoveFile( socket.GetFullPath() );
         }
     }
-#endif
 
     if( socket.Exists() )
     {
@@ -123,6 +181,7 @@ void KICAD_API_SERVER::Start()
             return;
         }
     }
+#endif
 
     m_server = std::make_unique<KINNG_REQUEST_SERVER>(
             fmt::format( "ipc://{}", socket.GetFullPath().ToStdString() ) );
