@@ -27,10 +27,17 @@
 #include <api/api_enums.h>
 #include <api/api_utils.h>
 #include <board_commit.h>
+#include <connectivity/connectivity_data.h>
+#include <tool/actions.h>
+#include <drc/drc_engine.h>
+#include <drc/drc_rule.h>
+#include <geometry/shape.h>
 #include <board_design_settings.h>
 #include <footprint.h>
 #include <kicad_clipboard.h>
 #include <netinfo.h>
+#include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
+#include <view/view.h>
 #include <pad.h>
 #include <pcb_edit_frame.h>
 #include <pcb_group.h>
@@ -48,6 +55,21 @@
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
 #include <zone.h>
+#include <router/pns_router.h>
+#include <router/router_tool.h>
+#include <router/pns_kicad_iface.h>
+#include <router/pns_routing_settings.h>
+#include <router/pns_sizes_settings.h>
+#include <router/pns_itemset.h>
+#include <router/pns_item.h>
+#include <router/pns_solid.h>
+#include <router/pns_segment.h>
+#include <router/pns_node.h>
+#include <router/pns_line.h>
+#include <router/pns_placement_algo.h>
+#include <geometry/shape_line_chain.h>
+#include <pcbnew_settings.h>
+#include <class_draw_panel_gal.h>
 
 #include <api/common/types/base_types.pb.h>
 #include <widgets/appearance_controls.h>
@@ -121,6 +143,7 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
             &API_HANDLER_PCB::handleSetBoardEditorAppearanceSettings );
     registerHandler<InjectDrcError, InjectDrcErrorResponse>(
             &API_HANDLER_PCB::handleInjectDrcError );
+    registerHandler<RouteTrack, RouteTrackResponse>( &API_HANDLER_PCB::handleRouteTrack );
 }
 
 
@@ -512,9 +535,35 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_PCB::handleCreateUpdateItemsIntern
             // cached geometry for footprint children updated when you move a footprint around.
             // And also, groups are special because they can contain any item type, so we
             // can't use CopyFrom on them either.
-            if( boardItem->Type() == PCB_FOOTPRINT_T  || boardItem->Type() == PCB_GROUP_T )
+            if( boardItem->Type() == PCB_FOOTPRINT_T )
             {
-                // Save group membership before removal, since Remove() severs the relationship
+                // For footprints, use Modify + direct property updates instead of
+                // Remove+Add.  The Remove+Add path leaves stale child items in the
+                // view cache, causing ghost footprints on the canvas.
+                FOOTPRINT* existingFp = static_cast<FOOTPRINT*>( boardItem );
+                FOOTPRINT* newFp = static_cast<FOOTPRINT*>( item.get() );
+
+                commit->Modify( existingFp );
+
+                VECTOR2I newPos( newFp->GetPosition() );
+
+                if( newPos != existingFp->GetPosition() )
+                    existingFp->SetPosition( newPos );
+
+                if( newFp->GetOrientationDegrees() != existingFp->GetOrientationDegrees() )
+                    existingFp->SetOrientationDegrees( newFp->GetOrientationDegrees() );
+
+                if( newFp->GetLayer() != existingFp->GetLayer() )
+                    existingFp->Flip( existingFp->GetPosition(), FLIP_DIRECTION::TOP_BOTTOM );
+
+                existingFp->SetLocked( newFp->IsLocked() );
+                existingFp->SetReference( newFp->GetReference() );
+                existingFp->SetValue( newFp->GetValue() );
+
+                existingFp->Serialize( newItem );
+            }
+            else if( boardItem->Type() == PCB_GROUP_T )
+            {
                 PCB_GROUP* parentGroup = dynamic_cast<PCB_GROUP*>( boardItem->GetParentGroup() );
 
                 commit->Remove( boardItem );
@@ -523,7 +572,6 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_PCB::handleCreateUpdateItemsIntern
                 BOARD_ITEM* newBoardItem = item.release();
                 commit->Add( newBoardItem );
 
-                // Restore group membership for the newly added item
                 if( parentGroup )
                     parentGroup->AddItem( newBoardItem );
             }
@@ -1536,6 +1584,501 @@ HANDLER_RESULT<Empty> API_HANDLER_PCB::handleRefillZones( const HANDLER_CONTEXT<
 }
 
 
+HANDLER_RESULT<RouteTrackResponse> API_HANDLER_PCB::handleRouteTrack(
+        const HANDLER_CONTEXT<RouteTrack>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    RouteTrackResponse response;
+
+    // Structured failure feedback: the message is a compact JSON object so an agentic caller can
+    // react (reroute the blocker, allow a via, change layer) instead of blindly retrying.
+    auto fail = [&]( const std::string& aReason, const std::string& aDetail ) -> RouteTrackResponse
+    {
+        response.set_success( false );
+        response.set_message( "{\"reason\":\"" + aReason + "\",\"detail\":\"" + aDetail + "\"}" );
+        return response;
+    };
+
+    BOARD*        board = frame()->GetBoard();
+    TOOL_MANAGER* mgr = frame()->GetToolManager();
+    ROUTER_TOOL*  routerTool = mgr ? mgr->GetTool<ROUTER_TOOL>() : nullptr;
+
+    if( !routerTool )
+        return fail( "error", "Router tool not available" );
+
+    // Build a fresh, self-contained PNS router bound to the live board + view, rather than
+    // mutating the interactive ROUTER_TOOL's shared router (unsafe to ClearWorld here).
+    // Mirrors generator_tool_pns_proxy.cpp Reset().
+    PNS_KICAD_IFACE* iface = new PNS_KICAD_IFACE;
+    iface->SetBoard( board );
+    iface->SetView( frame()->GetCanvas()->GetView() );
+    iface->SetHostTool( routerTool );
+
+    PNS::ROUTER* router = new PNS::ROUTER;
+    router->SetInterface( iface );
+    router->ClearWorld();
+    router->SyncWorld();
+
+    PCBNEW_SETTINGS* appSettings = frame()->GetPcbNewSettings();
+
+    if( appSettings )
+    {
+        if( !appSettings->m_PnsSettings )
+            appSettings->m_PnsSettings =
+                    std::make_unique<PNS::ROUTING_SETTINGS>( appSettings, "tools.pns" );
+
+        router->LoadSettings( appSettings->m_PnsSettings.get() );
+    }
+
+    const VECTOR2I startPt( aCtx.Request.start().x_nm(), aCtx.Request.start().y_nm() );
+    const VECTOR2I endPt( aCtx.Request.end().x_nm(), aCtx.Request.end().y_nm() );
+
+    PCB_LAYER_ID pcbLayer = FromProtoEnum<PCB_LAYER_ID>( aCtx.Request.layer() );
+    int          pnsLayer = iface->GetPNSLayerFromBoardLayer( pcbLayer );
+    int          slop = 75000; // 0.075 mm hit radius to reliably catch a pad/track anchor
+
+    // Resolve a routable anchor (pad/track/via on the routing layer) at a point.
+    auto pickItem = [&]( const VECTOR2I& aPt ) -> PNS::ITEM*
+    {
+        PNS::ITEM_SET candidates = router->QueryHoverItems( aPt, slop );
+        PNS::ITEM*    best = nullptr;
+
+        for( PNS::ITEM* item : candidates.Items() )
+        {
+            if( !item->OfKind( PNS::ITEM::SOLID_T | PNS::ITEM::SEGMENT_T | PNS::ITEM::ARC_T
+                               | PNS::ITEM::VIA_T ) )
+                continue;
+
+            if( !item->Layers().Overlaps( pnsLayer ) )
+                continue;
+
+            if( item->OfKind( PNS::ITEM::SOLID_T ) )   // prefer pads as anchors
+                return item;
+
+            if( !best )
+                best = item;
+        }
+
+        return best;
+    };
+
+    PNS::ITEM* startItem = pickItem( startPt );
+    PNS::ITEM* endItem = pickItem( endPt );
+
+    if( !startItem )
+        return fail( "no_start_anchor",
+                     "No routable copper (pad/track) at the start point on the given layer" );
+
+    // Vias are OPT-IN (last resort): auto-via only when the caller supplied a via diameter. With
+    // no via budget the route stays single-layer and, if boxed in, fails and reports the blocker so
+    // the agent can reroute the blocker rather than lean on vias.
+    const bool allowVia = aCtx.Request.via_diameter_nm() > 0 && !aCtx.Request.diff_pair();
+
+    // Diagnostics surfaced in the structured response message.
+    std::string g_reason = "committed";
+    std::string g_blockNet, g_blockRef;
+    bool        g_viaUsed = false;
+    bool        g_viaWouldHelp = false;
+    VECTOR2I    g_stall( 0, 0 );
+
+    // Identify the nearest other-net copper between a stalled head and the target -- the "blocker"
+    // shove could not get past. Walk several probe points along the path so we catch an obstacle
+    // that is a little ahead of where the head actually stopped.
+    auto findBlocker = [&]( const VECTOR2I& aStall, const VECTOR2I& aTarget )
+    {
+        VECTOR2I     dir = aTarget - aStall;
+        const double len = dir.EuclideanNorm();
+
+        // Walk the whole corridor from the stall toward the target at ~0.2 mm resolution, nearest
+        // first, so we name the first other-net copper standing in the way.
+        for( int step = 0; step <= 80; ++step )
+        {
+            const double dist = step * 200000.0;
+
+            if( dist > len )
+                break;
+
+            VECTOR2I probe = ( len < 1 ) ? aStall : aStall + dir.Resize( static_cast<int>( dist ) );
+
+            PNS::ITEM_SET hits = router->QueryHoverItems( probe, 300000 );
+
+            for( PNS::ITEM* it : hits.Items() )
+            {
+                if( !it->OfKind( PNS::ITEM::SOLID_T | PNS::ITEM::SEGMENT_T | PNS::ITEM::ARC_T
+                                 | PNS::ITEM::VIA_T ) )
+                    continue;
+
+                if( !it->Layers().Overlaps( router->GetCurrentLayer() ) )
+                    continue;
+
+                if( startItem && it->Net() == startItem->Net() )
+                    continue;
+
+                BOARD_ITEM* p = it->Parent();
+
+                if( !p )
+                    continue;
+
+                if( p->IsConnected() )
+                    g_blockNet = static_cast<BOARD_CONNECTED_ITEM*>( p )->GetNetname().ToStdString();
+
+                if( FOOTPRINT* fp = p->GetParentFootprint() )
+                    g_blockRef = fp->GetReference().ToStdString();
+
+                return;
+            }
+        }
+    };
+
+    switch( aCtx.Request.mode() )
+    {
+    case RM_WALK_AROUND: router->Settings().SetMode( PNS::RM_Walkaround );    break;
+    case RM_NO_SHOVE:    router->Settings().SetMode( PNS::RM_MarkObstacles ); break;
+    default:             router->Settings().SetMode( PNS::RM_Shove );         break;
+    }
+
+    router->SetMode( aCtx.Request.diff_pair() ? PNS::PNS_MODE_ROUTE_DIFF_PAIR
+                                              : PNS::PNS_MODE_ROUTE_SINGLE );
+
+    PNS::SIZES_SETTINGS sizes = router->Sizes();
+    iface->ImportSizes( sizes, startItem, startItem ? startItem->Net() : nullptr, startPt );
+
+    if( aCtx.Request.width_nm() > 0 )
+    {
+        sizes.SetTrackWidth( static_cast<int>( aCtx.Request.width_nm() ) );
+        sizes.SetTrackWidthIsExplicit( true );
+    }
+
+    if( aCtx.Request.via_diameter_nm() > 0 )
+        sizes.SetViaDiameter( static_cast<int>( aCtx.Request.via_diameter_nm() ) );
+
+    if( aCtx.Request.via_drill_nm() > 0 )
+        sizes.SetViaDrill( static_cast<int>( aCtx.Request.via_drill_nm() ) );
+
+    router->UpdateSizes( sizes );
+
+    if( !router->StartRouting( startPt, startItem, pnsLayer ) )
+        return fail( "start_failed", "StartRouting failed (no net/anchor at the start point?)" );
+
+    for( const kiapi::common::types::Vector2& wp : aCtx.Request.waypoints() )
+        router->Move( VECTOR2I( wp.x_nm(), wp.y_nm() ), nullptr );
+
+    auto d2 = []( const std::string& m )
+    {
+        if( FILE* f = fopen( "C:\\Users\\Robert\\Programs\\eda-expert\\temp\\route_dbg2.txt", "a" ) )
+        { fputs( m.c_str(), f ); fputs( "\n", f ); fclose( f ); }
+    };
+
+    router->Move( endPt, endItem );
+
+    const int reachTol = 200000; // 0.2 mm: head is "at" the target (allows pad-anchor snap)
+
+    auto curEnd = [&]() -> VECTOR2I
+    {
+        return router->Placer() ? router->Placer()->CurrentEnd() : startPt;
+    };
+
+    auto reached = [&]( const VECTOR2I& aTarget ) -> bool
+    {
+        return ( curEnd() - aTarget ).EuclideanNorm() <= reachTol;
+    };
+
+    bool reachedEnd = reached( endPt );
+    d2( "ENTER endPt=" + std::to_string( endPt.x ) + "," + std::to_string( endPt.y )
+        + " curEnd=" + std::to_string( curEnd().x ) + "," + std::to_string( curEnd().y )
+        + " reached1=" + std::to_string( reachedEnd ) );
+
+    // Auto-via: when a single-layer route can't reach the endpoint (boxed out by other-net
+    // copper that shove can't clear), drop a via at the furthest reachable point and continue
+    // on the paired (opposite) copper layer, which is typically clear.
+    if( !reachedEnd && allowVia )
+    {
+        VECTOR2I     stall = curEnd();
+        PCB_LAYER_ID curBoardLayer = iface->GetBoardLayerFromPNSLayer( router->GetCurrentLayer() );
+        PCB_LAYER_ID tgtBoardLayer = ( curBoardLayer == F_Cu ) ? B_Cu : F_Cu;
+        int          curPNS = iface->GetPNSLayerFromBoardLayer( curBoardLayer );
+        int          tgtPNS = iface->GetPNSLayerFromBoardLayer( tgtBoardLayer );
+
+        d2( "  viablock stall=" + std::to_string( stall.x ) + "," + std::to_string( stall.y )
+            + " curBoardLayer=" + std::to_string( curBoardLayer )
+            + " tgtBoardLayer=" + std::to_string( tgtBoardLayer )
+            + " progress=" + std::to_string( ( stall - startPt ).EuclideanNorm() ) );
+
+        if( router->RoutingInProgress() && ( stall - startPt ).EuclideanNorm() > reachTol )
+        {
+            // Mirror ROUTER_TOOL::handleLayerSwitch(aForceVia) + switchLayerOnViaPlacement():
+            // register the THROUGH-via layer pair so a valid via can actually be formed, arm
+            // via placement, fix the via at the stall point (FixRoute returning false means
+            // "route continues"), switch to the paired layer, then keep moving to the endpoint.
+            PNS::SIZES_SETTINGS sizes2 = router->Sizes();
+            sizes2.ClearLayerPairs();
+            sizes2.SetViaType( VIATYPE::THROUGH );
+            sizes2.AddLayerPair( curPNS, tgtPNS );
+            router->UpdateSizes( sizes2 );
+
+            if( !router->IsPlacingVia() )
+                router->ToggleViaPlacement();
+
+            router->Move( stall, nullptr );   // attach the armed via to the head at the stall
+            bool done = router->FixRoute( stall, nullptr, /*forceFinish*/ false,
+                                          /*forceCommit*/ false );
+
+            std::optional<int> newLayer = router->Sizes().PairedLayer( router->GetCurrentLayer() );
+
+            if( !newLayer )
+                newLayer = tgtPNS;
+
+            bool switched = router->SwitchLayer( *newLayer );
+
+            d2( "  done=" + std::to_string( done ) + " switched=" + std::to_string( switched )
+                + " newLayer=" + std::to_string( *newLayer )
+                + " curLayer=" + std::to_string( router->GetCurrentLayer() ) );
+
+            if( !done )
+                router->Move( endPt, endItem );
+
+            reachedEnd = reached( endPt );
+            d2( "  after2 curEnd=" + std::to_string( curEnd().x ) + ","
+                + std::to_string( curEnd().y ) + " reached2=" + std::to_string( reachedEnd ) );
+        }
+    }
+
+    // If we ended on a layer the target pad doesn't reach, enable a via so FixRoute lands on it.
+    if( endItem && !endItem->Layers().Overlaps( router->GetCurrentLayer() )
+        && !router->IsPlacingVia() )
+    {
+        router->ToggleViaPlacement();
+    }
+
+    // Blocked: the head could not reach the endpoint on this layer (and either vias were not
+    // permitted, or even a via could not clear it). Record where it stalled and what is in the way
+    // so the caller can reroute the blocker (or opt to allow a via / change layer).
+    if( !reachedEnd )
+    {
+        g_reason = "blocked";
+        g_stall  = curEnd();
+
+        findBlocker( g_stall, endPt );
+
+        // A single-layer attempt that is boxed in can usually escape with a via; flag it so the
+        // caller can choose between rerouting the blocker (preferred) and allowing a via.
+        g_viaWouldHelp = !allowVia;
+    }
+
+    // Verify the (possibly shoved) placement is collision-free BEFORE committing. PNS shove-mode
+    // FixRoute only rejects collisions against pads (a documented workaround in line_placer), so a
+    // headless commit can otherwise push a route that still violates track/via clearance. We check
+    // the full live trace against the placement node and refuse to commit anything dirty.
+    bool clean = reachedEnd;
+
+    if( clean )
+    {
+        PNS::PLACEMENT_ALGO* placer = router->Placer();
+        PNS::NODE*           node = placer ? placer->CurrentNode( true ) : nullptr;
+
+        if( !placer || !node || node->CheckColliding( placer->Traces() ) )
+            clean = false;
+    }
+
+    // Snapshot existing copper so we can report what the route created (PCB_VIA derives PCB_TRACK).
+    std::set<KIID> before;
+
+    for( PCB_TRACK* t : board->Tracks() )
+        before.insert( t->m_Uuid );
+
+    BOARD_DESIGN_SETTINGS&       bds = board->GetDesignSettings();
+    std::shared_ptr<DRC_ENGINE>& drc = bds.m_DRCEngine;
+
+    // True if two copper items of DIFFERENT nets are closer than their required clearance on any
+    // shared copper layer.
+    auto collides = [&]( BOARD_CONNECTED_ITEM* a, BOARD_CONNECTED_ITEM* b ) -> bool
+    {
+        if( !a || !b || a->GetNetCode() == b->GetNetCode() )
+            return false;
+
+        LSET common = a->GetLayerSet() & b->GetLayerSet() & LSET::AllCuMask();
+
+        for( PCB_LAYER_ID lyr : common.Seq() )
+        {
+            int minClear = bds.m_MinClearance;
+
+            if( drc )
+                minClear = drc->EvalRules( CLEARANCE_CONSTRAINT, a, b, lyr ).GetValue().Min();
+
+            std::shared_ptr<SHAPE> sa = a->GetEffectiveShape( lyr );
+            std::shared_ptr<SHAPE> sb = b->GetEffectiveShape( lyr );
+
+            if( sa && sb && sa->Collide( sb.get(), minClear ) )
+                return true;
+        }
+
+        return false;
+    };
+
+    // Count clearance violations between one net's tracks and all other-net copper. Comparing this
+    // before vs after the route catches not only the route's own new copper but also any pre-existing
+    // same-net segment whose geometry a post-route track cleanup/merge may have nudged into a
+    // violation.
+    auto countNetClearance = [&]( int net ) -> int
+    {
+        if( net < 0 )
+            return 0;
+
+        int count = 0;
+
+        for( PCB_TRACK* a : board->Tracks() )
+        {
+            if( a->GetNetCode() != net )
+                continue;
+
+            for( PCB_TRACK* b : board->Tracks() )
+                if( collides( a, b ) )
+                    count++;
+
+            for( FOOTPRINT* fp : board->Footprints() )
+                for( PAD* pad : fp->Pads() )
+                    if( collides( a, pad ) )
+                        count++;
+        }
+
+        return count;
+    };
+
+    const int routedNet = ( startItem && startItem->Parent() && startItem->Parent()->IsConnected() )
+            ? static_cast<BOARD_CONNECTED_ITEM*>( startItem->Parent() )->GetNetCode()
+            : -1;
+
+    // Capture connectivity + the routed net's clearance health to verify the commit afterwards.
+    const unsigned beforeUnconn   = board->GetConnectivity()->GetUnconnectedCount( false );
+    const int      beforeNetClear = countNetClearance( routedNet );
+
+    // Snap the final landing point onto the end item's nearest anchor (within tolerance) so the
+    // route joins the target exactly instead of stopping a few microns short, which would dangle
+    // (and be rejected by the connectivity check below).
+    VECTOR2I targetPt = endPt;
+
+    if( endItem )
+    {
+        bool snapped = false;
+
+        for( int i = 0; i < endItem->AnchorCount(); ++i )
+        {
+            if( ( endItem->Anchor( i ) - endPt ).EuclideanNorm() <= reachTol )
+            {
+                targetPt = endItem->Anchor( i );
+                snapped  = true;
+                break;
+            }
+        }
+
+        // No nearby anchor (pad/track-end): if the target is a track, snap to the exact nearest
+        // point ON the track so a mid-span T-join actually connects instead of landing microns off.
+        if( !snapped && endItem->OfKind( PNS::ITEM::SEGMENT_T ) )
+            targetPt = static_cast<PNS::SEGMENT*>( endItem )->Seg().NearestPoint( endPt );
+    }
+
+    bool ok = false;
+
+    if( clean )
+        ok = router->FixRoute( targetPt, endItem, /*forceFinish*/ true, /*forceCommit*/ false );
+
+    d2( "  clean=" + std::to_string( clean ) + " FixRoute ok=" + std::to_string( ok )
+        + " reachedEnd=" + std::to_string( reachedEnd )
+        + " beforeTracks=" + std::to_string( before.size() ) );
+
+    // Only commit a clean, complete route -- never leave a partial stub or a clearance violation.
+    if( ok )
+        router->CommitRouting();   // CommitPlacement() pushes the BOARD_COMMIT, then stops
+    else
+        router->StopRouting();
+
+    d2( "  afterCommit boardTracks=" + std::to_string( board->Tracks().size() ) );
+
+    delete router;   // delete router before iface (NODE dtor needs the iface's rule resolver)
+    delete iface;
+
+    bool committed = ok && reachedEnd;
+
+    // Post-commit verification against the REAL engines (PNS's own model misses hole/zone clearance
+    // and cannot see connectivity). Either failure reverts the whole commit (including any shoved
+    // neighbours) via undo so the board is never left dirty/dangling:
+    //   1. Connectivity -- the route must actually reduce the unconnected count. PNS can land a
+    //      route just short of the target, leaving a dangling stub that does not join the net.
+    //   2. Clearance    -- the routed net must not GAIN any clearance violation against other-net
+    //      copper (covers the route's own copper and any cleanup-shifted same-net segment).
+    if( committed )
+    {
+        board->GetConnectivity()->RecalculateRatsnest();
+        const unsigned afterUnconn   = board->GetConnectivity()->GetUnconnectedCount( false );
+        const int      afterNetClear = countNetClearance( routedNet );
+        const bool     connectedGain = afterUnconn < beforeUnconn;
+        const bool     clearanceOk   = afterNetClear <= beforeNetClear;
+
+        if( !connectedGain || !clearanceOk )
+        {
+            frame()->GetToolManager()->RunAction( ACTIONS::undo );   // synchronous (aNow=true)
+            board->GetConnectivity()->RecalculateRatsnest();
+            committed = false;
+            g_reason  = !connectedGain ? "connectivity_fail" : "clearance_fail";
+            d2( "  REVERTED: connectedGain=" + std::to_string( connectedGain )
+                + " clearanceOk=" + std::to_string( clearanceOk )
+                + " unconn " + std::to_string( beforeUnconn ) + "->" + std::to_string( afterUnconn )
+                + " netClear " + std::to_string( beforeNetClear ) + "->"
+                + std::to_string( afterNetClear ) );
+        }
+    }
+
+    if( committed )
+    {
+        for( PCB_TRACK* t : board->Tracks() )
+        {
+            if( !before.count( t->m_Uuid ) )
+            {
+                response.add_created_items()->set_value( t->m_Uuid.AsString().ToStdString() );
+
+                if( t->Type() == PCB_VIA_T )
+                    g_viaUsed = true;
+            }
+        }
+    }
+
+    if( frame()->GetCanvas() )
+        frame()->GetCanvas()->Refresh();
+
+    response.set_success( committed );
+
+    // Compact JSON so an agent can decide what to do next (reroute the blocker, allow a via, change
+    // layer) instead of blindly retrying. reason in {committed, blocked, connectivity_fail,
+    // clearance_fail}; on 'blocked' we also report where it stalled and what was in the way.
+    std::string msg = "{\"reason\":\"" + g_reason
+                      + "\",\"via_used\":" + ( g_viaUsed ? "true" : "false" );
+
+    if( g_reason == "blocked" )
+    {
+        char buf[80];
+        snprintf( buf, sizeof( buf ), ",\"stall_mm\":[%.3f,%.3f]", g_stall.x / 1e6, g_stall.y / 1e6 );
+        msg += buf;
+        msg += ",\"layer\":\"" + board->GetLayerName( pcbLayer ).ToStdString() + "\"";
+
+        if( !g_blockNet.empty() || !g_blockRef.empty() )
+            msg += ",\"blocker\":{\"net\":\"" + g_blockNet + "\",\"ref\":\"" + g_blockRef + "\"}";
+
+        msg += ",\"via_would_help\":" + std::string( g_viaWouldHelp ? "true" : "false" );
+    }
+
+    msg += "}";
+    response.set_message( msg );
+    return response;
+}
+
+
 HANDLER_RESULT<SavedDocumentResponse> API_HANDLER_PCB::handleSaveDocumentToString(
         const HANDLER_CONTEXT<SaveDocumentToString>& aCtx )
 {
@@ -1594,7 +2137,173 @@ HANDLER_RESULT<CreateItemsResponse> API_HANDLER_PCB::handleParseAndCreateItemsFr
     if( !documentValidation )
         return tl::unexpected( documentValidation.error() );
 
+    BOARD* board = frame()->GetBoard();
+    wxString contents = wxString::FromUTF8( aCtx.Request.contents() );
+
+    if( contents.IsEmpty() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "contents string is empty" );
+        return tl::unexpected( e );
+    }
+
+    // If the input doesn't start with (kicad_pcb or (footprint, wrap it in a board
+    // container so the parser can handle individual items (tracks, vias, etc.)
+    wxString toParse = contents.Trim();
+
+    if( !toParse.StartsWith( wxT( "(kicad_pcb" ) ) && !toParse.StartsWith( wxT( "(footprint" ) ) )
+    {
+        // Build a wrapping kicad_pcb with layers and nets from the current board.
+        // This mirrors what CLIPBOARD_IO::SaveSelection does for board-level items.
+        STRING_FORMATTER wrapper;
+
+        wrapper.Print( "(kicad_pcb (version %d) (generator \"api\") (generator_version \"1.0\")",
+                       SEXPR_BOARD_FILE_VERSION );
+
+        // Write layer definitions from current board
+        wrapper.Print( "(layers" );
+
+        for( PCB_LAYER_ID layer : board->GetEnabledLayers().CuStack() )
+        {
+            wrapper.Print( "(%d %s %s)", layer,
+                           wrapper.Quotew( LSET::Name( layer ) ).c_str(),
+                           LAYER::ShowType( board->GetLayerType( layer ) ) );
+        }
+
+        for( PCB_LAYER_ID layer : board->GetEnabledLayers().TechAndUserUIOrder() )
+        {
+            wrapper.Print( "(%d %s user)", layer,
+                           wrapper.Quotew( LSET::Name( layer ) ).c_str() );
+        }
+
+        wrapper.Print( ")" );  // close layers
+
+        // Net definitions
+        wrapper.Print( "(net 0 \"\")" );
+
+        for( const auto& [code, netinfo] : board->GetNetInfo().NetsByNetcode() )
+        {
+            if( code > 0 )
+            {
+                wrapper.Print( "(net %d %s)", code,
+                               wrapper.Quotew( netinfo->GetNetname() ).c_str() );
+            }
+        }
+
+        // Insert the user's content
+        wrapper.Print( "%s", toParse.utf8_str().data() );
+        wrapper.Print( ")" );  // close kicad_pcb
+
+        toParse = wxString::FromUTF8( wrapper.GetString() );
+    }
+
+    // Parse the string
+    PCB_IO_KICAD_SEXPR io;
+    BOARD_ITEM* parsedItem = nullptr;
+
+    try
+    {
+        parsedItem = io.Parse( toParse );
+    }
+    catch( const PARSE_ERROR& e )
+    {
+        ApiResponseStatus err;
+        err.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        err.set_error_message( fmt::format( "parse error: {}", e.What().ToStdString() ) );
+        return tl::unexpected( err );
+    }
+
+    if( !parsedItem )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "parsing produced no items" );
+        return tl::unexpected( e );
+    }
+
+    BOARD_COMMIT* commit = static_cast<BOARD_COMMIT*>( getCurrentCommit( aCtx.ClientName ) );
     CreateItemsResponse response;
+
+    auto addItem = [&]( BOARD_ITEM* aItem )
+    {
+        aItem->SetParent( board );
+
+        // Map nets from parsed board to real board
+        if( auto* connItem = dynamic_cast<BOARD_CONNECTED_ITEM*>( aItem ) )
+        {
+            if( connItem->GetNet() )
+            {
+                NETINFO_ITEM* realNet = board->FindNet( connItem->GetNet()->GetNetname() );
+                if( realNet )
+                    connItem->SetNet( realNet );
+                else
+                    connItem->SetNet( board->FindNet( 0 ) );
+            }
+        }
+
+        board->Add( aItem );
+
+        if( commit )
+            commit->Added( aItem );
+
+        google::protobuf::Any itemMsg;
+        aItem->Serialize( itemMsg );
+        ItemCreationResult* result = response.add_created_items();
+        result->mutable_status()->set_code( ItemStatusCode::ISC_OK );
+        *result->mutable_item() = itemMsg;
+    };
+
+    if( parsedItem->Type() == PCB_T )
+    {
+        // Parsed a full board — extract all items
+        BOARD* clipBoard = static_cast<BOARD*>( parsedItem );
+
+        // Map nets
+        clipBoard->MapNets( board );
+
+        // Move footprints
+        for( FOOTPRINT* fp : clipBoard->Footprints() )
+        {
+            clipBoard->Remove( fp );
+            addItem( fp );
+        }
+
+        // Move tracks
+        for( PCB_TRACK* track : clipBoard->Tracks() )
+        {
+            clipBoard->Remove( track );
+            addItem( track );
+        }
+
+        // Move zones
+        for( ZONE* zone : clipBoard->Zones() )
+        {
+            clipBoard->Remove( zone );
+            addItem( zone );
+        }
+
+        // Move drawings (text, shapes, dimensions, etc.)
+        for( BOARD_ITEM* item : clipBoard->Drawings() )
+        {
+            clipBoard->Remove( item );
+            addItem( item );
+        }
+
+        delete clipBoard;
+    }
+    else if( parsedItem->Type() == PCB_FOOTPRINT_T )
+    {
+        // Single footprint
+        addItem( parsedItem );
+    }
+    else
+    {
+        // Single item (shouldn't normally happen with wrapped parse)
+        addItem( parsedItem );
+    }
+
+    frame()->GetCanvas()->Refresh();
     return response;
 }
 

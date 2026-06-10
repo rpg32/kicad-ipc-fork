@@ -424,3 +424,40 @@ message InteractiveMoveItems
 
   repeated kiapi.common.types.KIID items = 2;
 }
+
+//// Push-and-shove router ////
+
+// How the PNS router treats existing copper while routing.
+enum RouteMode
+{
+  RM_UNKNOWN = 0;
+  RM_SHOVE = 1;        // push existing tracks/vias aside to make room
+  RM_WALK_AROUND = 2;  // route around obstacles without moving them
+  RM_NO_SHOVE = 3;     // stop at the first obstacle (highlight collisions)
+}
+
+// Route a single track between two board points using KiCad's interactive
+// push-and-shove (PNS) engine, headlessly. Unlike CreateItems (which places raw
+// geometry), this negotiates clearances and shoves/walks-around existing copper.
+// Runs to completion and returns synchronously with the items that were created.
+message RouteTrack
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+  kiapi.common.types.Vector2 start = 2;                 // start point (nm)
+  kiapi.common.types.Vector2 end = 3;                   // end point (nm)
+  repeated kiapi.common.types.Vector2 waypoints = 4;    // optional intermediate points
+  string net = 5;                                       // net name; if empty, inferred from the item at 'start'
+  kiapi.board.types.BoardLayer layer = 6;               // routing layer (start layer)
+  int64 width_nm = 7;                                   // 0 = net class / board default
+  int64 via_diameter_nm = 8;                            // 0 = default
+  int64 via_drill_nm = 9;                               // 0 = default
+  RouteMode mode = 10;                                  // RM_UNKNOWN => RM_SHOVE
+  bool diff_pair = 11;                                  // route as a differential pair
+}
+
+message RouteTrackResponse
+{
+  bool success = 1;
+  string message = 2;
+  repeated kiapi.common.types.KIID created_items = 3;   // tracks/vias added by the route
+}
