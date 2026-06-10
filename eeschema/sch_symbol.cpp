@@ -47,6 +47,8 @@
 #include <validators.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
 
 
 std::unordered_map<TRANSFORM, int> SCH_SYMBOL::s_transformToOrientationCache;
@@ -3841,6 +3843,100 @@ const SCH_SYMBOL_INSTANCE* SCH_SYMBOL::getInstance( const KIID_PATH& aSheetPath 
     return nullptr;
 }
 
+
+
+void SCH_SYMBOL::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::SchematicSymbol symbol;
+
+    symbol.mutable_id()->set_value( m_Uuid.AsStdString() );
+    symbol.mutable_library_identifier()->set_library_nickname(
+        std::string( m_lib_id.GetLibNickname() ) );
+    symbol.mutable_library_identifier()->set_entry_name(
+        std::string( m_lib_id.GetLibItemName() ) );
+
+    kiapi::common::PackVector2( *symbol.mutable_position(), m_pos );
+
+    int orient = GetOrientation();
+    int rotation = orient & ~( SYM_MIRROR_X | SYM_MIRROR_Y );
+    switch( rotation )
+    {
+    case SYM_ORIENT_0:   symbol.set_orientation( 0 ); break;
+    case SYM_ORIENT_90:  symbol.set_orientation( 1 ); break;
+    case SYM_ORIENT_180: symbol.set_orientation( 2 ); break;
+    case SYM_ORIENT_270: symbol.set_orientation( 3 ); break;
+    default:             symbol.set_orientation( 0 ); break;
+    }
+    symbol.set_mirror_x( ( orient & SYM_MIRROR_X ) != 0 );
+    symbol.set_mirror_y( ( orient & SYM_MIRROR_Y ) != 0 );
+
+    symbol.set_unit( GetUnit() );
+    symbol.set_body_style( GetBodyStyle() );
+
+    for( const SCH_FIELD& field : m_fields )
+    {
+        auto* f = symbol.add_fields();
+        f->mutable_id()->set_value( field.m_Uuid.AsStdString() );
+        f->set_name( field.GetName().ToStdString() );
+        f->set_text( field.GetText().ToStdString() );
+        kiapi::common::PackVector2( *f->mutable_position(), field.GetPosition() );
+        f->set_visible( field.IsVisible() );
+    }
+
+    symbol.set_exclude_from_bom( GetExcludedFromBOM() );
+    symbol.set_exclude_from_board( GetExcludedFromBoard() );
+    symbol.set_dnp( GetDNP() );
+
+    aContainer.PackFrom( symbol );
+}
+
+
+bool SCH_SYMBOL::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::SchematicSymbol symbol;
+    if( !aContainer.UnpackTo( &symbol ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( symbol.id().value() );
+
+    m_lib_id = LIB_ID( symbol.library_identifier().library_nickname(),
+                        symbol.library_identifier().entry_name() );
+
+    SetPosition( kiapi::common::UnpackVector2( symbol.position() ) );
+
+    int orient = SYM_ORIENT_0;
+    switch( symbol.orientation() )
+    {
+    case 0: orient = SYM_ORIENT_0;   break;
+    case 1: orient = SYM_ORIENT_90;  break;
+    case 2: orient = SYM_ORIENT_180; break;
+    case 3: orient = SYM_ORIENT_270; break;
+    }
+    if( symbol.mirror_x() ) orient |= SYM_MIRROR_X;
+    if( symbol.mirror_y() ) orient |= SYM_MIRROR_Y;
+    SetOrientation( orient );
+
+    SetUnit( symbol.unit() );
+    SetBodyStyle( symbol.body_style() );
+
+    m_fields.clear();
+    for( const auto& f : symbol.fields() )
+    {
+        SCH_FIELD field( this, FIELD_T::USER );
+        const_cast<KIID&>( field.m_Uuid ) = KIID( f.id().value() );
+        field.SetName( wxString::FromUTF8( f.name() ) );
+        field.SetText( wxString::FromUTF8( f.text() ) );
+        field.SetPosition( kiapi::common::UnpackVector2( f.position() ) );
+        field.SetVisible( f.visible() );
+        m_fields.push_back( field );
+    }
+
+    SetExcludedFromBOM( symbol.exclude_from_bom() );
+    SetExcludedFromBoard( symbol.exclude_from_board() );
+    SetDNP( symbol.dnp() );
+
+    return true;
+}
 
 static struct SCH_SYMBOL_DESC
 {

@@ -50,6 +50,8 @@
 #include <markup_parser.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
 
 
 SCH_TEXT::SCH_TEXT( const VECTOR2I& aPos, const wxString& aText, SCH_LAYER_ID aLayer, KICAD_T aType ) :
@@ -756,6 +758,28 @@ void SCH_TEXT::Show( int nestLevel, std::ostream& os ) const
 
 #endif
 
+
+
+void SCH_TEXT::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::SchematicText text;
+    text.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *text.mutable_position(), GetPosition() );
+    text.set_text( GetText().ToStdString() );
+    aContainer.PackFrom( text );
+}
+
+
+bool SCH_TEXT::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::SchematicText text;
+    if( !aContainer.UnpackTo( &text ) )
+        return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( text.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( text.position() ) );
+    SetText( wxString::FromUTF8( text.text() ) );
+    return true;
+}
 
 static struct SCH_TEXT_DESC
 {

@@ -1595,6 +1595,7 @@ void SCH_LABEL::Serialize( google::protobuf::Any& aContainer ) const
 
     label.mutable_id()->set_value( m_Uuid.AsStdString() );
     kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+    label.mutable_text()->mutable_text()->set_text( GetText().ToStdString() );
 
     aContainer.PackFrom( label );
 }
@@ -1609,6 +1610,9 @@ bool SCH_LABEL::Deserialize( const google::protobuf::Any& aContainer )
 
     const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
     SetPosition( kiapi::common::UnpackVector2( label.position() ) );
+
+    if( label.has_text() && label.text().has_text() )
+        SetText( wxString::FromUTF8( label.text().text().text() ) );
 
     return true;
 }

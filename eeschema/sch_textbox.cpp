@@ -631,3 +631,27 @@ static struct SCH_TEXTBOX_DESC
         propMgr.Mask( TYPE_HASH( SCH_TEXTBOX ), TYPE_HASH( EDA_TEXT ), _HKI( "Orientation" ) );
     }
 } _SCH_TEXTBOX_DESC;
+
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
+
+void SCH_TEXTBOX::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::SchematicTextBox msg;
+    msg.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *msg.mutable_start(), GetStart() );
+    kiapi::common::PackVector2( *msg.mutable_end(), GetEnd() );
+    msg.set_text( GetText().ToStdString() );
+    aContainer.PackFrom( msg );
+}
+
+bool SCH_TEXTBOX::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::SchematicTextBox msg;
+    if( !aContainer.UnpackTo( &msg ) ) return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    SetStart( kiapi::common::UnpackVector2( msg.start() ) );
+    SetEnd( kiapi::common::UnpackVector2( msg.end() ) );
+    SetText( wxString::FromUTF8( msg.text() ) );
+    return true;
+}

@@ -2165,3 +2165,39 @@ static struct SCH_SHEET_DESC
                     groupAttributes );
     }
 } _SCH_SHEET_DESC;
+
+#include <api/api_utils.h>
+#include <api/schematic/schematic_types.pb.h>
+
+void SCH_SHEET::Serialize( google::protobuf::Any& aContainer ) const
+{
+    kiapi::schematic::types::Sheet msg;
+    msg.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *msg.mutable_position(), m_pos );
+    kiapi::common::PackVector2( *msg.mutable_size(), m_size );
+    msg.set_name( GetName().ToStdString() );
+    msg.set_filename( GetFileName().ToStdString() );
+
+    for( const SCH_FIELD& field : m_fields )
+    {
+        auto* f = msg.add_fields();
+        f->mutable_id()->set_value( field.m_Uuid.AsStdString() );
+        f->set_name( field.GetName().ToStdString() );
+        f->set_text( field.GetText().ToStdString() );
+        kiapi::common::PackVector2( *f->mutable_position(), field.GetPosition() );
+        f->set_visible( field.IsVisible() );
+    }
+
+    aContainer.PackFrom( msg );
+}
+
+bool SCH_SHEET::Deserialize( const google::protobuf::Any& aContainer )
+{
+    kiapi::schematic::types::Sheet msg;
+    if( !aContainer.UnpackTo( &msg ) ) return false;
+    const_cast<KIID&>( m_Uuid ) = KIID( msg.id().value() );
+    m_pos = kiapi::common::UnpackVector2( msg.position() );
+    m_size = kiapi::common::UnpackVector2( msg.size() );
+    // Name and filename are set through fields in KiCad, not simple setters
+    return true;
+}

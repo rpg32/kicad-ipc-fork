@@ -199,6 +199,9 @@ public:
 
     EDA_ITEM* Clone() const override;
 
+    void Serialize( google::protobuf::Any& aContainer ) const override;
+    bool Deserialize( const google::protobuf::Any& aContainer ) override;
+
     virtual bool ConnectionPropagatesTo( const EDA_ITEM* aItem ) const override;
 
     BITMAPS GetMenuImage() const override;
@@ -246,6 +249,9 @@ public:
     wxString GetItemDescription( UNITS_PROVIDER* aUnitsProvider, bool aFull ) const override;
 
     EDA_ITEM* Clone() const override;
+
+    void Serialize( google::protobuf::Any& aContainer ) const override;
+    bool Deserialize( const google::protobuf::Any& aContainer ) override;
 
     BITMAPS GetMenuImage() const override;
 

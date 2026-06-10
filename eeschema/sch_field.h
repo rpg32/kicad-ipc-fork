@@ -60,6 +60,9 @@ public:
         return aItem && SCH_FIELD_T == aItem->Type();
     }
 
+    void Serialize( google::protobuf::Any &aContainer ) const override;
+    bool Deserialize( const google::protobuf::Any &aContainer ) override;
+
     wxString GetClass() const override
     {
         return wxT( "SCH_FIELD" );
