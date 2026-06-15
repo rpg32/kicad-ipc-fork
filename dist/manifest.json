@@ -1,0 +1,18 @@
+{
+  "name": "kicad-ipc-fork",
+  "description": "Experimental KiCad 10 build with extended IPC API handlers (schematic CRUD, RouteTrack, etc.) for the live-view agent tooling.",
+  "forkCommit": "f8f55edd54d96993f70683f0fc7f8cc9d2e6cc55",
+  "baseUpstream": "f492b347ee7a6fc17bff42e9b5a6769328016487",
+  "baseVersionString": "10.0.0",
+  "experimental": true,
+  "binaries": [
+    "common/kicommon.dll",
+    "api/kiapi.dll",
+    "common/gal/kigal.dll",
+    "eeschema/_eeschema.dll",
+    "eeschema/eeschema.exe",
+    "pcbnew/_pcbnew.dll",
+    "pcbnew/pcbnew.exe",
+    "kicad/kicad-cli.exe"
+  ]
+}
