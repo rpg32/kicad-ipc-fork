@@ -19,5 +19,8 @@ Not affiliated with or endorsed by the KiCad project.
 Matched binary set (`bin/`): kicommon, kiapi, kigal, _eeschema, eeschema.exe,
 _pcbnew, pcbnew.exe, kicad-cli. See `manifest.json` and `README.md`.
 
-## License
+## License & trademark
 GPLv3+ (KiCad's license). Corresponding source: branch `local-ipc-fixes`.
+"KiCad" is a trademark of The KiCad Project; this is an **unofficial, unaffiliated,
+unendorsed** fork. The GPL covers the code, not the name. Report issues here, not
+to KiCad.
