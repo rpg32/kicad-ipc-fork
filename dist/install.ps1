@@ -33,7 +33,7 @@ $binDir = Join-Path $scriptDir "bin"
 $manifestPath = Join-Path $scriptDir "manifest.json"
 
 Write-Host "=== KiCad IPC-fork installer ===" -ForegroundColor Cyan
-Write-Host "  EXPERIMENTAL agent-generated build — treat as unvetted.`n" -ForegroundColor Yellow
+Write-Host "  EXPERIMENTAL agent-generated build - treat as unvetted.`n" -ForegroundColor Yellow
 
 if (-not (Test-Path $manifestPath)) { throw "manifest.json not found next to this script." }
 if (-not (Test-Path $binDir)) { throw "bin/ folder not found next to this script. Did you extract the full release zip?" }
@@ -44,7 +44,7 @@ if (-not (Test-Path $KiCadDir)) { throw "KiCad bin dir not found: $KiCadDir  (pa
 $eeschema = Join-Path $KiCadDir "_eeschema.dll"
 if (-not (Test-Path $eeschema)) { throw "$KiCadDir does not look like a KiCad bin dir (no _eeschema.dll)." }
 
-# Version check (soft — KiCad reports the same string across ABI-incompatible builds).
+# Version check (soft - KiCad reports the same string across ABI-incompatible builds).
 $cli = Join-Path $KiCadDir "kicad-cli.exe"
 if (Test-Path $cli) {
     $ver = (& $cli version 2>$null | Select-Object -First 1)
