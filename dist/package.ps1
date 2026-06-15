@@ -29,7 +29,7 @@ if (-not $BuildDir) { $BuildDir = Join-Path $repoRoot "build\msvc-win64-release"
 if (-not $OutDir)   { $OutDir   = Join-Path $scriptDir "release" }
 
 $manifest = Get-Content (Join-Path $scriptDir "manifest.json") -Raw | ConvertFrom-Json
-$tag = "kicad-ipc-fork-$($manifest.forkCommit.Substring(0,8))"
+$tag = "kicad-ipc-fork-$($manifest.forkVersion)"
 $stage = Join-Path $OutDir $tag
 $stageBin = Join-Path $stage "bin"
 
