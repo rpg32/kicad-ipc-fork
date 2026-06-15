@@ -1,3 +1,22 @@
+# ⚠️ This is an experimental KiCad fork — not upstream KiCad
+
+This repository is a **fork** of KiCad 10 (branch `local-ipc-fixes`) that adds
+extended IPC API handlers for the
+[live-view](https://github.com/rpg32/live-view) agent tooling. **These changes
+were produced experimentally through agentic (LLM-driven) coding and are
+unvetted — they were not written or reviewed by KiCad maintainers, and are not
+endorsed by or affiliated with the KiCad project.** Treat them as questionable.
+Prebuilt binaries are ABI-locked to one exact KiCad build; mixing them with a
+different install can crash or corrupt files. Use a VM or scratch install and
+back up your projects.
+
+See **[`dist/README.md`](dist/README.md)** for what changed, install/uninstall
+scripts, build steps, known issues, and the GPLv3 source-offer details.
+
+The original upstream KiCad README follows.
+
+---
+
 # KiCad README
 
 For specific documentation about [building KiCad](https://dev-docs.kicad.org/en/build/), policies
