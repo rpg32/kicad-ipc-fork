@@ -100,3 +100,18 @@ build tree into a release zip alongside the install scripts.
 KiCad is **GPLv3 (or later)**. This fork is likewise GPLv3+. You may use, modify,
 and redistribute it under those terms. The corresponding modified source is this
 repository, branch `local-ipc-fixes`. See the upstream `LICENSE.*` files.
+
+## Trademark & affiliation
+
+"KiCad" and the KiCad logo are **trademarks of The KiCad Project / Kicad Services
+Corporation**. This repository is an **independent, unofficial fork**. It is **not
+produced, endorsed, sponsored, or supported by the KiCad project**, and the
+maintainers are not affiliated with it.
+
+The GPL covers the *code*; it does **not** grant rights to the KiCad name or logo.
+These binaries are provided only for the experimental tooling described above and
+identify themselves as "KiCad" solely because that string is baked into the
+upstream sources — that is **not** a claim of being official KiCad. If you
+redistribute modified builds more broadly, review KiCad's trademark policy
+(<https://www.kicad.org/about/trademarks/>) and consider rebranding the binaries.
+Report issues here, **never** to the KiCad project.
