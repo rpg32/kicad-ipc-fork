@@ -81,19 +81,24 @@ pwsh dist/package.ps1
 ```
 
 `dist/package.ps1` collects the binaries listed in `dist/manifest.json` from the
-build tree into a release zip alongside the install scripts.
+build tree into a release zip alongside the install scripts. To update the fork
+and cut new releases, see **[`MAINTAINING.md`](MAINTAINING.md)**.
 
-## Known issues
+## API surface notes
 
-- **Schematic netlist name drift.** The fork registers an IPC handler named
-  `GetNets`/`GetNetsResponse`, but the protobuf bindings the client generates
-  expose `GetSchematicNetlist`/`SchematicNetlistResponse`. A client calling
-  `GetSchematicNetlist` gets `no handler available`. live-view currently works
-  around this by reading live state via `SaveDocumentToString` and parsing with
-  `kicad-cli`. The proper fix is to reconcile the names. (This mismatch is a
-  good illustration of the "experimental" caveat above.)
-- Several stock IPC reads remain unimplemented (`GetSchematicHierarchy`,
-  `GetBoundingBox`, `GetPageSettings`, `GetTitleBlockInfo`, `RefreshEditor`).
+- **Schematic netlist (`GetNets`).** This fork names the handler
+  `GetNets`/`GetNetsResponse` (upstream KiCad uses a different name). The
+  live-view client generates its protobuf bindings from **this fork's** protos
+  (see `regen-protos.sh`), so the names match and `kicad_sch_get_nets` calls it
+  directly over IPC. Earlier client builds generated from upstream KiCad master
+  and hit `no handler available` — if you regenerate bindings, always source them
+  from the fork. `GetNetsResponse` returns net **name + code** only; per-pin
+  connection lists are not exposed (extending the handler to include nodes would
+  be a future change — see `MAINTAINING.md`).
+- The fork also adds `GetSheetHierarchy` under a fork-specific name; same
+  generate-from-the-fork rule applies.
+- Several stock IPC reads remain unimplemented in this build
+  (`GetBoundingBox`, `GetPageSettings`, `GetTitleBlockInfo`, `RefreshEditor`).
 
 ## License
 
