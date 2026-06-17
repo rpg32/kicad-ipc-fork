@@ -572,6 +572,18 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_PCB::handleCreateUpdateItemsIntern
                 existingFp->SetReference( newFp->GetReference() );
                 existingFp->SetValue( newFp->GetValue() );
 
+                // Sync field text geometry (position + text attributes) from the
+                // incoming footprint so clients can reposition reference/value/user
+                // fields over IPC. Without this, only the field *strings* (set above)
+                // were applied and field moves were silently dropped. Fields are
+                // mutated in place (not replaced), so the view-cache caveat noted
+                // above does not apply.
+                for( PCB_FIELD* newField : newFp->GetFields() )
+                {
+                    if( PCB_FIELD* dstField = existingFp->GetField( newField->GetId() ) )
+                        dstField->SetAttributes( *newField, /* aSetPosition */ true );
+                }
+
                 existingFp->Serialize( newItem );
             }
             else if( boardItem->Type() == PCB_GROUP_T )
