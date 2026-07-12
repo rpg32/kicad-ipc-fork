@@ -18,6 +18,8 @@
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <cstdlib>
+
 #include <magic_enum.hpp>
 #include <properties/property.h>
 
@@ -2274,9 +2276,15 @@ HANDLER_RESULT<RouteTrackResponse> API_HANDLER_PCB::handleRouteTrack(
     for( const kiapi::common::types::Vector2& wp : aCtx.Request.waypoints() )
         router->Move( VECTOR2I( wp.x_nm(), wp.y_nm() ), nullptr );
 
+    // Opt-in RouteTrack trace log: set KICAD_ROUTE_DEBUG_LOG to a writable file path.
     auto d2 = []( const std::string& m )
     {
-        if( FILE* f = fopen( "C:\\Users\\Robert\\Programs\\eda-expert\\temp\\route_dbg2.txt", "a" ) )
+        static const char* logPath = std::getenv( "KICAD_ROUTE_DEBUG_LOG" );
+
+        if( !logPath )
+            return;
+
+        if( FILE* f = fopen( logPath, "a" ) )
         { fputs( m.c_str(), f ); fputs( "\n", f ); fclose( f ); }
     };
 
