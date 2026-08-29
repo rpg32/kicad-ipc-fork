@@ -1,9 +1,9 @@
 {
   "name": "kicad-ipc-fork",
-  "description": "Experimental KiCad 10 build with extended IPC API handlers (schematic CRUD, RouteTrack, etc.) for the live-view agent tooling.",
-  "forkVersion": "v10.0.0-ipc-fork",
-  "baseUpstream": "4889bf913c411740632d32475627bc2b4daf2a77",
-  "baseVersionString": "10.0.0",
+  "description": "Experimental KiCad 10.0.6 build with extended IPC API handlers (schematic CRUD, RouteTrack push-and-shove routing, DragItems push-and-shove dragging) for the live-view agent tooling.",
+  "forkVersion": "v10.0.6-ipc.2",
+  "baseUpstream": "14f1d5d3ddd3c7a9f59d93cfc3ac3704315a42e5",
+  "baseVersionString": "10.0.6",
   "experimental": true,
   "binaries": [
     "common/kicommon.dll",
@@ -13,6 +13,18 @@
     "eeschema/eeschema.exe",
     "pcbnew/_pcbnew.dll",
     "pcbnew/pcbnew.exe",
-    "kicad/kicad-cli.exe"
+    "pcbnew/kicad_3dsg.dll",
+    "kicad/kicad.exe",
+    "kicad/kicad-cli.exe",
+    "cvpcb/_cvpcb.dll",
+    "gerbview/_gerbview.dll",
+    "gerbview/gerbview.exe",
+    "pagelayout_editor/_pl_editor.dll",
+    "pagelayout_editor/pl_editor.exe",
+    "pcb_calculator/_pcb_calculator.dll",
+    "pcb_calculator/pcb_calculator.exe",
+    "bitmap2component/bitmap2component.exe",
+    "scripting/_kipython.dll",
+    "eeschema/ngspice.dll"
   ]
 }
