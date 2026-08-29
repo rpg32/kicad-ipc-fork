@@ -548,3 +548,48 @@ message RouteTrackResponse
   string message = 2;
   repeated kiapi.common.types.KIID created_items = 3;   // tracks/vias added by the route
 }
+
+//// Push-and-shove dragger ////
+
+// How the PNS dragger treats existing copper while dragging.
+enum DragMode
+{
+  DRM_UNKNOWN = 0;
+  DRM_SHOVE = 1;        // push existing tracks/vias aside to make room
+  DRM_WALK_AROUND = 2;  // drag around obstacles without moving them
+  DRM_NO_SHOVE = 3;     // stop at the first obstacle (report the collision)
+}
+
+// Drag an existing track, via, or footprint to a new position using KiCad's
+// interactive push-and-shove (PNS) engine, headlessly. This is the counterpart to
+// RouteTrack for copper that already exists: the dragged item keeps its net and its
+// connections while neighbouring copper is shoved or walked around.
+//
+// Unlike InteractiveMoveItems -- which selects the items, hands control to the GUI
+// move tool and waits for a human to confirm or cancel -- this runs to completion and
+// returns synchronously with what actually moved.
+message DragItems
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+  kiapi.common.types.Vector2 start = 2;      // point identifying the item to grab (nm)
+  kiapi.common.types.Vector2 end = 3;        // point to drag it to (nm)
+  kiapi.board.types.BoardLayer layer = 4;    // layer on which to resolve the grabbed item
+  DragMode mode = 5;                         // DRM_UNKNOWN => DRM_SHOVE
+
+  // Grab the whole footprint whose pad is at 'start' and drag it with its attached
+  // copper (PNS DM_COMPONENT), instead of grabbing a single track/via.
+  bool drag_footprint = 6;
+
+  // Free-angle corner drag: move the nearest corner without preserving the existing
+  // track angles (PNS DM_FREE_ANGLE). Ignored when drag_footprint is set.
+  bool free_angle = 7;
+}
+
+message DragItemsResponse
+{
+  bool success = 1;
+  string message = 2;                                  // JSON {reason, detail} on failure
+  repeated kiapi.common.types.KIID moved_items = 3;    // items whose geometry the drag changed
+  repeated kiapi.common.types.KIID created_items = 4;  // segments the shove added
+  repeated kiapi.common.types.KIID deleted_items = 5;  // segments the shove merged away
+}

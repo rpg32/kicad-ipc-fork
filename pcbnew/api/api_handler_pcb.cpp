@@ -71,6 +71,7 @@
 #include <router/pns_node.h>
 #include <router/pns_line.h>
 #include <router/pns_placement_algo.h>
+#include <router/pns_drag_algo.h>
 #include <geometry/shape_line_chain.h>
 #include <pcbnew_settings.h>
 #include <class_draw_panel_gal.h>
@@ -158,6 +159,7 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
     registerHandler<InjectDrcError, InjectDrcErrorResponse>(
             &API_HANDLER_PCB::handleInjectDrcError );
     registerHandler<RouteTrack, RouteTrackResponse>( &API_HANDLER_PCB::handleRouteTrack );
+    registerHandler<DragItems, DragItemsResponse>( &API_HANDLER_PCB::handleDragItems );
 }
 
 
@@ -2586,6 +2588,356 @@ HANDLER_RESULT<RouteTrackResponse> API_HANDLER_PCB::handleRouteTrack(
     }
 
     msg += "}";
+    response.set_message( msg );
+    return response;
+}
+
+
+HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
+        const HANDLER_CONTEXT<DragItems>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    DragItemsResponse response;
+
+    // Structured failure feedback, same contract as RouteTrack: a compact JSON object so an
+    // agentic caller can react (drag the blocker instead, allow shove, pick another grab point)
+    // rather than blindly retrying.
+    auto fail = [&]( const std::string& aReason, const std::string& aDetail ) -> DragItemsResponse
+    {
+        response.set_success( false );
+        response.set_message( "{\"reason\":\"" + aReason + "\",\"detail\":\"" + aDetail + "\"}" );
+        return response;
+    };
+
+    BOARD*        board = frame()->GetBoard();
+    TOOL_MANAGER* mgr = frame()->GetToolManager();
+    ROUTER_TOOL*  routerTool = mgr ? mgr->GetTool<ROUTER_TOOL>() : nullptr;
+
+    if( !routerTool )
+        return fail( "error", "Router tool not available" );
+
+    // Fresh, self-contained PNS router bound to the live board + view, rather than mutating the
+    // interactive ROUTER_TOOL's shared router. Same construction as handleRouteTrack.
+    PNS_KICAD_IFACE* iface = new PNS_KICAD_IFACE;
+    iface->SetBoard( board );
+    iface->SetView( frame()->GetCanvas()->GetView() );
+    iface->SetHostTool( routerTool );
+
+    PNS::ROUTER* router = new PNS::ROUTER;
+    router->SetInterface( iface );
+    router->ClearWorld();
+    router->SyncWorld();
+
+    // Every early return past this point must tear the router down first (delete router before
+    // iface -- the NODE dtor needs the iface's rule resolver).
+    auto teardown = [&]()
+    {
+        delete router;
+        delete iface;
+    };
+
+    PCBNEW_SETTINGS* appSettings = frame()->GetPcbNewSettings();
+
+    if( appSettings )
+    {
+        if( !appSettings->m_PnsSettings )
+            appSettings->m_PnsSettings =
+                    std::make_unique<PNS::ROUTING_SETTINGS>( appSettings, "tools.pns" );
+
+        router->LoadSettings( appSettings->m_PnsSettings.get() );
+    }
+
+    const VECTOR2I startPt( aCtx.Request.start().x_nm(), aCtx.Request.start().y_nm() );
+    const VECTOR2I endPt( aCtx.Request.end().x_nm(), aCtx.Request.end().y_nm() );
+
+    PCB_LAYER_ID pcbLayer = FromProtoEnum<PCB_LAYER_ID>( aCtx.Request.layer() );
+    int          pnsLayer = iface->GetPNSLayerFromBoardLayer( pcbLayer );
+    const int    slop = 75000;   // 0.075 mm grab radius, matching RouteTrack's anchor tolerance
+
+    const bool dragFootprint = aCtx.Request.drag_footprint();
+
+    // Resolve what to grab at the start point. A component drag grabs a pad (SOLID_T); a copper
+    // drag grabs the track/arc/via itself and must NOT grab a pad, which is not draggable.
+    auto pickItem = [&]() -> PNS::ITEM*
+    {
+        PNS::ITEM_SET candidates = router->QueryHoverItems( startPt, slop );
+        PNS::ITEM*    best = nullptr;
+
+        for( PNS::ITEM* item : candidates.Items() )
+        {
+            if( !item->Layers().Overlaps( pnsLayer ) )
+                continue;
+
+            if( dragFootprint )
+            {
+                if( item->OfKind( PNS::ITEM::SOLID_T ) )
+                    return item;
+
+                continue;
+            }
+
+            if( !item->OfKind( PNS::ITEM::SEGMENT_T | PNS::ITEM::ARC_T | PNS::ITEM::VIA_T ) )
+                continue;
+
+            if( item->OfKind( PNS::ITEM::VIA_T ) )   // prefer a via: it is the unambiguous grab
+                return item;
+
+            if( !best )
+                best = item;
+        }
+
+        return best;
+    };
+
+    PNS::ITEM* startItem = pickItem();
+
+    if( !startItem )
+    {
+        teardown();
+        return fail( "no_grab_item",
+                     dragFootprint
+                             ? "No pad at the start point on the given layer to drag a footprint by"
+                             : "No draggable copper (track/arc/via) at the start point on the given "
+                               "layer" );
+    }
+
+    switch( aCtx.Request.mode() )
+    {
+    case DRM_WALK_AROUND: router->Settings().SetMode( PNS::RM_Walkaround );    break;
+    case DRM_NO_SHOVE:    router->Settings().SetMode( PNS::RM_MarkObstacles ); break;
+    default:              router->Settings().SetMode( PNS::RM_Shove );         break;
+    }
+
+    router->SetMode( PNS::PNS_MODE_ROUTE_SINGLE );
+
+    int dragMode = PNS::DM_ANY;
+
+    if( dragFootprint )
+        dragMode = PNS::DM_COMPONENT;
+    else if( aCtx.Request.free_angle() )
+        dragMode = PNS::DM_ANY | PNS::DM_FREE_ANGLE;
+
+    // Snapshot copper and footprint geometry so we can report exactly what the drag disturbed --
+    // the dragged item, anything the shove pushed, and any segment the shove merged or added.
+    auto trackSig = []( const PCB_TRACK* t ) -> std::string
+    {
+        return std::to_string( t->GetStart().x ) + "," + std::to_string( t->GetStart().y ) + ","
+               + std::to_string( t->GetEnd().x ) + "," + std::to_string( t->GetEnd().y ) + ","
+               + std::to_string( t->GetWidth() ) + "," + std::to_string( t->GetLayer() );
+    };
+
+    auto fpSig = []( const FOOTPRINT* fp ) -> std::string
+    {
+        return std::to_string( fp->GetPosition().x ) + "," + std::to_string( fp->GetPosition().y )
+               + "," + std::to_string( fp->GetOrientation().AsDegrees() ) + ","
+               + std::to_string( fp->GetLayer() );
+    };
+
+    std::map<KIID, std::string> beforeTracks;
+    std::map<KIID, std::string> beforeFootprints;
+
+    for( PCB_TRACK* t : board->Tracks() )
+        beforeTracks[t->m_Uuid] = trackSig( t );
+
+    for( FOOTPRINT* fp : board->Footprints() )
+        beforeFootprints[fp->m_Uuid] = fpSig( fp );
+
+    BOARD_DESIGN_SETTINGS&       bds = board->GetDesignSettings();
+    std::shared_ptr<DRC_ENGINE>& drc = bds.m_DRCEngine;
+
+    // True if two copper items of DIFFERENT nets are closer than their required clearance on any
+    // shared copper layer.
+    auto collides = [&]( BOARD_CONNECTED_ITEM* a, BOARD_CONNECTED_ITEM* b ) -> bool
+    {
+        if( !a || !b || a->GetNetCode() == b->GetNetCode() )
+            return false;
+
+        LSET common = a->GetLayerSet() & b->GetLayerSet() & LSET::AllCuMask();
+
+        for( PCB_LAYER_ID lyr : common.Seq() )
+        {
+            int minClear = bds.m_MinClearance;
+
+            if( drc )
+                minClear = drc->EvalRules( CLEARANCE_CONSTRAINT, a, b, lyr ).GetValue().Min();
+
+            std::shared_ptr<SHAPE> sa = a->GetEffectiveShape( lyr );
+            std::shared_ptr<SHAPE> sb = b->GetEffectiveShape( lyr );
+
+            if( sa && sb && sa->Collide( sb.get(), minClear ) )
+                return true;
+        }
+
+        return false;
+    };
+
+    // A shove displaces OTHER nets too, so a single-net clearance check (as RouteTrack does) would
+    // miss violations introduced on a shoved neighbour. Watch every net with copper near the drag
+    // corridor instead -- bounded work, and shove only propagates locally.
+    BOX2I corridor;
+    corridor.Merge( startPt );
+    corridor.Merge( endPt );
+    corridor.Inflate( 5000000 );   // 5 mm margin around the drag path
+
+    std::set<int> watchNets;
+
+    for( PCB_TRACK* t : board->Tracks() )
+    {
+        if( t->GetNetCode() > 0 && corridor.Intersects( t->GetBoundingBox() ) )
+            watchNets.insert( t->GetNetCode() );
+    }
+
+    for( FOOTPRINT* fp : board->Footprints() )
+    {
+        for( PAD* pad : fp->Pads() )
+        {
+            if( pad->GetNetCode() > 0 && corridor.Intersects( pad->GetBoundingBox() ) )
+                watchNets.insert( pad->GetNetCode() );
+        }
+    }
+
+    // Clearance violations between the watched nets' tracks and all other-net copper.
+    auto countWatchedClearance = [&]() -> int
+    {
+        int count = 0;
+
+        for( PCB_TRACK* a : board->Tracks() )
+        {
+            if( !watchNets.count( a->GetNetCode() ) )
+                continue;
+
+            for( PCB_TRACK* b : board->Tracks() )
+                if( collides( a, b ) )
+                    count++;
+
+            for( FOOTPRINT* fp : board->Footprints() )
+                for( PAD* pad : fp->Pads() )
+                    if( collides( a, pad ) )
+                        count++;
+        }
+
+        return count;
+    };
+
+    const unsigned beforeUnconn = board->GetConnectivity()->GetUnconnectedCount( false );
+    const int      beforeClear = countWatchedClearance();
+
+    if( !router->StartDragging( startPt, startItem, dragMode ) )
+    {
+        std::string why = router->FailureReason().ToStdString();
+        teardown();
+        return fail( "drag_start_failed", why.empty() ? "StartDragging refused the grab" : why );
+    }
+
+    router->Move( endPt, nullptr );
+
+    // The dragger reports, exactly as the GUI status bar does, whether the current position is a
+    // legal placement. Refuse to commit an illegal drag rather than writing a known violation.
+    bool dragOk = true;
+
+    if( PNS::DRAG_ALGO* dragger = router->GetDragger() )
+    {
+        bool dragStatus = true;
+
+        if( dragger->GetForceMarkObstaclesMode( &dragStatus ) )
+            dragOk = dragStatus;
+    }
+
+    bool ok = false;
+
+    if( dragOk )
+        ok = router->FixRoute( endPt, nullptr, /*forceFinish*/ true, /*forceCommit*/ false );
+
+    if( ok )
+        router->CommitRouting();
+    else
+        router->StopRouting();
+
+    teardown();
+
+    bool committed = ok;
+    std::string reason = committed ? "committed" : ( dragOk ? "drag_failed" : "blocked" );
+
+    // Post-commit verification against the real engines, mirroring RouteTrack: PNS's own model
+    // cannot see connectivity, and a drag that breaks a connection is worse than one that fails.
+    // Either failure reverts the whole commit (including everything the shove moved) via undo.
+    if( committed )
+    {
+        board->GetConnectivity()->RecalculateRatsnest();
+        const unsigned afterUnconn = board->GetConnectivity()->GetUnconnectedCount( false );
+        const int      afterClear = countWatchedClearance();
+        const bool     connectivityOk = afterUnconn <= beforeUnconn;
+        const bool     clearanceOk = afterClear <= beforeClear;
+
+        if( !connectivityOk || !clearanceOk )
+        {
+            frame()->GetToolManager()->RunAction( ACTIONS::undo );   // synchronous (aNow=true)
+            board->GetConnectivity()->RecalculateRatsnest();
+            committed = false;
+            reason = !connectivityOk ? "connectivity_fail" : "clearance_fail";
+        }
+    }
+
+    int movedCount = 0;
+
+    if( committed )
+    {
+        for( PCB_TRACK* t : board->Tracks() )
+        {
+            auto it = beforeTracks.find( t->m_Uuid );
+
+            if( it == beforeTracks.end() )
+            {
+                response.add_created_items()->set_value( t->m_Uuid.AsString().ToStdString() );
+            }
+            else
+            {
+                if( it->second != trackSig( t ) )
+                {
+                    response.add_moved_items()->set_value( t->m_Uuid.AsString().ToStdString() );
+                    movedCount++;
+                }
+
+                beforeTracks.erase( it );
+            }
+        }
+
+        // Whatever is left in the snapshot was merged away by the shove.
+        for( const auto& [uuid, sig] : beforeTracks )
+            response.add_deleted_items()->set_value( uuid.AsString().ToStdString() );
+
+        for( FOOTPRINT* fp : board->Footprints() )
+        {
+            auto it = beforeFootprints.find( fp->m_Uuid );
+
+            if( it != beforeFootprints.end() && it->second != fpSig( fp ) )
+            {
+                response.add_moved_items()->set_value( fp->m_Uuid.AsString().ToStdString() );
+                movedCount++;
+            }
+        }
+    }
+
+    if( frame()->GetCanvas() )
+        frame()->GetCanvas()->Refresh();
+
+    response.set_success( committed );
+
+    // reason in {committed, blocked, drag_failed, connectivity_fail, clearance_fail}; shoved_items
+    // tells the caller how much of the board this drag disturbed.
+    std::string msg = "{\"reason\":\"" + reason + "\",\"moved_items\":"
+                      + std::to_string( movedCount )
+                      + ",\"created_items\":" + std::to_string( response.created_items_size() )
+                      + ",\"deleted_items\":" + std::to_string( response.deleted_items_size() )
+                      + ",\"layer\":\"" + board->GetLayerName( pcbLayer ).ToStdString() + "\"}";
+
     response.set_message( msg );
     return response;
 }

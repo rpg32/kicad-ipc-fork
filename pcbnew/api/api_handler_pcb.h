@@ -161,6 +161,8 @@ private:
 
     HANDLER_RESULT<RouteTrackResponse> handleRouteTrack( const HANDLER_CONTEXT<RouteTrack>& aCtx );
 
+    HANDLER_RESULT<DragItemsResponse> handleDragItems( const HANDLER_CONTEXT<DragItems>& aCtx );
+
     HANDLER_RESULT<commands::SavedDocumentResponse> handleSaveDocumentToString(
                 const HANDLER_CONTEXT<commands::SaveDocumentToString>& aCtx );
 
