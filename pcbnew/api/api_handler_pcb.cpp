@@ -72,6 +72,10 @@
 #include <router/pns_line.h>
 #include <router/pns_placement_algo.h>
 #include <router/pns_drag_algo.h>
+#include <geometry/seg.h>
+#include <limits>
+#include <map>
+#include <set>
 #include <geometry/shape_line_chain.h>
 #include <pcbnew_settings.h>
 #include <class_draw_panel_gal.h>
@@ -2721,6 +2725,10 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
                                "layer" );
     }
 
+    const int draggedNet = ( startItem->Parent() && startItem->Parent()->IsConnected() )
+            ? static_cast<BOARD_CONNECTED_ITEM*>( startItem->Parent() )->GetNetCode()
+            : -1;
+
     switch( aCtx.Request.mode() )
     {
     case DRM_WALK_AROUND: router->Settings().SetMode( PNS::RM_Walkaround );    break;
@@ -2754,10 +2762,14 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
     };
 
     std::map<KIID, std::string> beforeTracks;
+    std::map<KIID, int>         beforeTrackNets;
     std::map<KIID, std::string> beforeFootprints;
 
     for( PCB_TRACK* t : board->Tracks() )
-        beforeTracks[t->m_Uuid] = trackSig( t );
+    {
+        beforeTracks[t->m_Uuid]    = trackSig( t );
+        beforeTrackNets[t->m_Uuid] = t->GetNetCode();
+    }
 
     for( FOOTPRINT* fp : board->Footprints() )
         beforeFootprints[fp->m_Uuid] = fpSig( fp );
@@ -2898,10 +2910,18 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
         }
     }
 
-    int movedCount = 0;
+    int           movedCount = 0;
+    std::set<int> touchedNets;   // nets whose copper this drag added, removed or reshaped
+    bool          reached = true;
+    double        shortBy = 0.0;
 
     if( committed )
     {
+        // Closest approach of the dragged net's new copper to the point we asked for. PNS
+        // clamps a drag at the first obstacle and reports success for the clamped position,
+        // so without this the caller cannot tell "moved where I asked" from "moved partway".
+        double bestDist = std::numeric_limits<double>::max();
+
         for( PCB_TRACK* t : board->Tracks() )
         {
             auto it = beforeTracks.find( t->m_Uuid );
@@ -2909,23 +2929,46 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
             if( it == beforeTracks.end() )
             {
                 response.add_created_items()->set_value( t->m_Uuid.AsString().ToStdString() );
+                touchedNets.insert( t->GetNetCode() );
+
+                if( t->GetNetCode() == draggedNet )
+                {
+                    bestDist = std::min( bestDist,
+                                         (double) SEG( t->GetStart(), t->GetEnd() ).Distance( endPt ) );
+                }
             }
             else
             {
                 if( it->second != trackSig( t ) )
                 {
                     response.add_moved_items()->set_value( t->m_Uuid.AsString().ToStdString() );
+                    touchedNets.insert( t->GetNetCode() );
                     movedCount++;
+
+                    if( t->GetNetCode() == draggedNet )
+                    {
+                        bestDist = std::min( bestDist,
+                                             (double) SEG( t->GetStart(), t->GetEnd() ).Distance( endPt ) );
+                    }
                 }
 
                 beforeTracks.erase( it );
             }
         }
 
-        // Whatever is left in the snapshot was merged away by the shove.
+        // Whatever is left in the snapshot was removed or replaced by the drag.
         for( const auto& [uuid, sig] : beforeTracks )
+        {
             response.add_deleted_items()->set_value( uuid.AsString().ToStdString() );
 
+            auto n = beforeTrackNets.find( uuid );
+
+            if( n != beforeTrackNets.end() )
+                touchedNets.insert( n->second );
+        }
+
+        // Footprints keep their identity across a component drag, so a KIID diff is meaningful
+        // for them even though it is not for track segments.
         for( FOOTPRINT* fp : board->Footprints() )
         {
             auto it = beforeFootprints.find( fp->m_Uuid );
@@ -2936,7 +2979,18 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
                 movedCount++;
             }
         }
+
+        const double reachTol = 200000.0;   // 0.2 mm, the tolerance RouteTrack uses
+
+        if( bestDist > reachTol && bestDist < std::numeric_limits<double>::max() )
+        {
+            reached = false;
+            shortBy = bestDist / 1e6;
+        }
     }
+
+    // Nets the shove disturbed: everything the drag touched except the net we grabbed.
+    touchedNets.erase( draggedNet );
 
     if( frame()->GetCanvas() )
         frame()->GetCanvas()->Refresh();
@@ -2945,11 +2999,34 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
 
     // reason in {committed, blocked, drag_failed, connectivity_fail, clearance_fail}; shoved_items
     // tells the caller how much of the board this drag disturbed.
-    std::string msg = "{\"reason\":\"" + reason + "\",\"moved_items\":"
-                      + std::to_string( movedCount )
-                      + ",\"created_items\":" + std::to_string( response.created_items_size() )
-                      + ",\"deleted_items\":" + std::to_string( response.deleted_items_size() )
-                      + ",\"layer\":\"" + board->GetLayerName( pcbLayer ).ToStdString() + "\"}";
+    std::string shovedList;
+
+    for( int net : touchedNets )
+    {
+        if( NETINFO_ITEM* ni = board->FindNet( net ) )
+        {
+            if( !shovedList.empty() )
+                shovedList += "\",\"";
+
+            shovedList += ni->GetNetname().ToStdString();
+        }
+    }
+
+    std::string msg = "{\"reason\":\"" + reason + "\""
+                      + ",\"reached\":" + ( reached ? "true" : "false" );
+
+    if( !reached )
+    {
+        char buf[48];
+        snprintf( buf, sizeof( buf ), ",\"stopped_short_mm\":%.3f", shortBy );
+        msg += buf;
+    }
+
+    msg += ",\"shoved_nets\":[" + ( shovedList.empty() ? "" : "\"" + shovedList + "\"" ) + "]"
+           + ",\"moved_items\":" + std::to_string( movedCount )
+           + ",\"created_items\":" + std::to_string( response.created_items_size() )
+           + ",\"deleted_items\":" + std::to_string( response.deleted_items_size() )
+           + ",\"layer\":\"" + board->GetLayerName( pcbLayer ).ToStdString() + "\"}";
 
     response.set_message( msg );
     return response;
