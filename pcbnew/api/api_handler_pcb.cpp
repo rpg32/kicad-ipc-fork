@@ -2134,6 +2134,14 @@ HANDLER_RESULT<RouteTrackResponse> API_HANDLER_PCB::handleRouteTrack(
     router->ClearWorld();
     router->SyncWorld();
 
+    // Every return past this point must tear the router down first (delete router before iface --
+    // the NODE dtor needs the iface's rule resolver).
+    auto teardown = [&]()
+    {
+        delete router;
+        delete iface;
+    };
+
     PCBNEW_SETTINGS* appSettings = frame()->GetPcbNewSettings();
 
     if( appSettings )
@@ -2181,8 +2189,11 @@ HANDLER_RESULT<RouteTrackResponse> API_HANDLER_PCB::handleRouteTrack(
     PNS::ITEM* endItem = pickItem( endPt );
 
     if( !startItem )
+    {
+        teardown();
         return fail( "no_start_anchor",
                      "No routable copper (pad/track) at the start point on the given layer" );
+    }
 
     // Vias are OPT-IN (last resort): auto-via only when the caller supplied a via diameter. With
     // no via budget the route stays single-layer and, if boxed in, fails and reports the blocker so
@@ -2273,7 +2284,10 @@ HANDLER_RESULT<RouteTrackResponse> API_HANDLER_PCB::handleRouteTrack(
     router->UpdateSizes( sizes );
 
     if( !router->StartRouting( startPt, startItem, pnsLayer ) )
+    {
+        teardown();
         return fail( "start_failed", "StartRouting failed (no net/anchor at the start point?)" );
+    }
 
     for( const kiapi::common::types::Vector2& wp : aCtx.Request.waypoints() )
         router->Move( VECTOR2I( wp.x_nm(), wp.y_nm() ), nullptr );
@@ -2515,8 +2529,7 @@ HANDLER_RESULT<RouteTrackResponse> API_HANDLER_PCB::handleRouteTrack(
 
     d2( "  afterCommit boardTracks=" + std::to_string( board->Tracks().size() ) );
 
-    delete router;   // delete router before iface (NODE dtor needs the iface's rule resolver)
-    delete iface;
+    teardown();
 
     bool committed = ok && reachedEnd;
 
