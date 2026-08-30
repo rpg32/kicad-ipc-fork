@@ -1,7 +1,7 @@
 {
   "name": "kicad-ipc-fork",
   "description": "Experimental KiCad 10.0.6 build with extended IPC API handlers (schematic CRUD, RouteTrack push-and-shove routing, DragItems push-and-shove dragging) for the live-view agent tooling.",
-  "forkVersion": "v10.0.6-ipc.3",
+  "forkVersion": "v10.0.6-ipc.4",
   "baseUpstream": "14f1d5d3ddd3c7a9f59d93cfc3ac3704315a42e5",
   "baseVersionString": "10.0.6",
   "experimental": true,

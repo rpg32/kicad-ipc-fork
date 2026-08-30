@@ -74,6 +74,7 @@
 #include <router/pns_drag_algo.h>
 #include <geometry/seg.h>
 #include <limits>
+#include <vector>
 #include <map>
 #include <set>
 #include <geometry/shape_line_chain.h>
@@ -2838,9 +2839,24 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
 
     std::set<int> watchNets;
 
+    // Collect the corridor-local copper once, and compare only within it. The first version of
+    // this check walked every track on the board against every other track: O(n^2) over the whole
+    // design, invisible on a 38-segment test board and ruinous on a real one. On a 2857-segment /
+    // 707-via / 1202-pad board that is ~11.6 million clearance-rule evaluations, which ran past
+    // the client's socket timeout -- so the caller was told the drag "timed out" while KiCad had
+    // already committed it, leaving an orphaned commit the caller could not see. A shove only
+    // disturbs copper near the drag, so copper outside the corridor cannot have changed.
+    std::vector<PCB_TRACK*> nearTracks;
+    std::vector<PAD*>       nearPads;
+
     for( PCB_TRACK* t : board->Tracks() )
     {
-        if( t->GetNetCode() > 0 && corridor.Intersects( t->GetBoundingBox() ) )
+        if( !corridor.Intersects( t->GetBoundingBox() ) )
+            continue;
+
+        nearTracks.push_back( t );
+
+        if( t->GetNetCode() > 0 )
             watchNets.insert( t->GetNetCode() );
     }
 
@@ -2848,7 +2864,12 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
     {
         for( PAD* pad : fp->Pads() )
         {
-            if( pad->GetNetCode() > 0 && corridor.Intersects( pad->GetBoundingBox() ) )
+            if( !corridor.Intersects( pad->GetBoundingBox() ) )
+                continue;
+
+            nearPads.push_back( pad );
+
+            if( pad->GetNetCode() > 0 )
                 watchNets.insert( pad->GetNetCode() );
         }
     }
@@ -2858,19 +2879,18 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
     {
         int count = 0;
 
-        for( PCB_TRACK* a : board->Tracks() )
+        for( PCB_TRACK* a : nearTracks )
         {
             if( !watchNets.count( a->GetNetCode() ) )
                 continue;
 
-            for( PCB_TRACK* b : board->Tracks() )
+            for( PCB_TRACK* b : nearTracks )
                 if( collides( a, b ) )
                     count++;
 
-            for( FOOTPRINT* fp : board->Footprints() )
-                for( PAD* pad : fp->Pads() )
-                    if( collides( a, pad ) )
-                        count++;
+            for( PAD* pad : nearPads )
+                if( collides( a, pad ) )
+                    count++;
         }
 
         return count;
