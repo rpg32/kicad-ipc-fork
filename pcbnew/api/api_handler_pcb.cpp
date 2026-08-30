@@ -2725,9 +2725,34 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
                                "layer" );
     }
 
-    const int draggedNet = ( startItem->Parent() && startItem->Parent()->IsConnected() )
+    // Which net are we dragging? The PNS item's parent is the obvious source, but segments PNS
+    // itself created (a track laid by RouteTrack earlier in the same session) do not reliably
+    // carry one -- and that is exactly the copper an agent drags. Falling through to -1 there
+    // silently poisons both outputs: the dragged net is reported as a shoved neighbour, and
+    // `reached` defaults to true because no created track ever matches the net. So fall back to
+    // the board's own answer: the net of the track nearest the grab point.
+    int draggedNet = ( startItem->Parent() && startItem->Parent()->IsConnected() )
             ? static_cast<BOARD_CONNECTED_ITEM*>( startItem->Parent() )->GetNetCode()
             : -1;
+
+    if( draggedNet < 0 )
+    {
+        double bestGrabDist = std::numeric_limits<double>::max();
+
+        for( PCB_TRACK* t : board->Tracks() )
+        {
+            if( t->GetNetCode() < 0 || !t->IsOnLayer( pcbLayer ) )
+                continue;
+
+            double d = SEG( t->GetStart(), t->GetEnd() ).Distance( startPt );
+
+            if( d < bestGrabDist )
+            {
+                bestGrabDist = d;
+                draggedNet = t->GetNetCode();
+            }
+        }
+    }
 
     switch( aCtx.Request.mode() )
     {
@@ -3012,21 +3037,29 @@ HANDLER_RESULT<DragItemsResponse> API_HANDLER_PCB::handleDragItems(
         }
     }
 
-    std::string msg = "{\"reason\":\"" + reason + "\""
-                      + ",\"reached\":" + ( reached ? "true" : "false" );
+    // Only describe a commit that happened. reached / shoved_nets / the item counts all describe
+    // the state after a successful drag; emitting them alongside a failure invites a caller to
+    // read "reached":true off a drag that changed nothing.
+    std::string msg = "{\"reason\":\"" + reason + "\"";
 
-    if( !reached )
+    if( committed )
     {
-        char buf[48];
-        snprintf( buf, sizeof( buf ), ",\"stopped_short_mm\":%.3f", shortBy );
-        msg += buf;
+        msg += ",\"reached\":" + std::string( reached ? "true" : "false" );
+
+        if( !reached )
+        {
+            char buf[48];
+            snprintf( buf, sizeof( buf ), ",\"stopped_short_mm\":%.3f", shortBy );
+            msg += buf;
+        }
+
+        msg += ",\"shoved_nets\":[" + ( shovedList.empty() ? "" : "\"" + shovedList + "\"" ) + "]"
+               + ",\"moved_items\":" + std::to_string( movedCount )
+               + ",\"created_items\":" + std::to_string( response.created_items_size() )
+               + ",\"deleted_items\":" + std::to_string( response.deleted_items_size() );
     }
 
-    msg += ",\"shoved_nets\":[" + ( shovedList.empty() ? "" : "\"" + shovedList + "\"" ) + "]"
-           + ",\"moved_items\":" + std::to_string( movedCount )
-           + ",\"created_items\":" + std::to_string( response.created_items_size() )
-           + ",\"deleted_items\":" + std::to_string( response.deleted_items_size() )
-           + ",\"layer\":\"" + board->GetLayerName( pcbLayer ).ToStdString() + "\"}";
+    msg += ",\"layer\":\"" + board->GetLayerName( pcbLayer ).ToStdString() + "\"}";
 
     response.set_message( msg );
     return response;
