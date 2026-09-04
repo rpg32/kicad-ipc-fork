@@ -32,8 +32,9 @@ if (Test-Path $markerPath) {
 }
 # Fall back to whatever *.original backups exist if the marker is gone.
 if (-not $files) {
-    $files = Get-ChildItem $KiCadDir -Filter "*.original" |
-        ForEach-Object { $_.Name -replace '\.original$', '' }
+    # Recurse: backups for the SWIG module and 3D plugins live in subdirectories.
+    $files = Get-ChildItem $KiCadDir -Filter "*.original" -Recurse |
+        ForEach-Object { $_.FullName.Substring($KiCadDir.TrimEnd('\\').Length + 1) -replace '\.original$', '' }
 }
 
 if (-not $files) {

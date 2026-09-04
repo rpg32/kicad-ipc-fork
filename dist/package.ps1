@@ -41,11 +41,20 @@ if (-not (Test-Path $BuildDir)) { throw "Build dir not found: $BuildDir (build t
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stageBin -Force | Out-Null
 
-foreach ($rel in $manifest.binaries) {
+# A manifest entry is either a build-relative path string (staged flat into bin/ by
+# basename) or an object {src, dest} whose dest is relative to bin/ and may carry
+# subdirectories. The Python SWIG module and the 3D loader plugins live in
+# Lib/site-packages and plugins/3d respectively; they link kicommon like everything
+# else and MUST ship with it, but a flat copy cannot put them where KiCad loads them.
+foreach ($entry in $manifest.binaries) {
+    if ($entry -is [string]) { $rel = $entry; $dest = Split-Path $entry -Leaf }
+    else                     { $rel = $entry.src; $dest = $entry.dest }
     $src = Join-Path $BuildDir $rel
     if (-not (Test-Path $src)) { throw "Missing built binary: $src" }
-    Copy-Item $src (Join-Path $stageBin (Split-Path $rel -Leaf)) -Force
-    Write-Host "  staged $(Split-Path $rel -Leaf)" -ForegroundColor Green
+    $out = Join-Path $stageBin $dest
+    New-Item -ItemType Directory -Path (Split-Path $out -Parent) -Force | Out-Null
+    Copy-Item $src $out -Force
+    Write-Host "  staged $dest" -ForegroundColor Green
 }
 
 foreach ($f in @("install.ps1", "uninstall.ps1", "manifest.json", "README.md")) {

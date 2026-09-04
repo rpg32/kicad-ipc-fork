@@ -1,7 +1,7 @@
 {
   "name": "kicad-ipc-fork",
   "description": "Experimental KiCad 10.0.6 build with extended IPC API handlers (schematic CRUD, RouteTrack push-and-shove routing, DragItems push-and-shove dragging) for the live-view agent tooling.",
-  "forkVersion": "v10.0.6-ipc.4",
+  "forkVersion": "v10.0.6-ipc.5",
   "baseUpstream": "14f1d5d3ddd3c7a9f59d93cfc3ac3704315a42e5",
   "baseVersionString": "10.0.6",
   "experimental": true,
@@ -25,6 +25,26 @@
     "pcb_calculator/pcb_calculator.exe",
     "bitmap2component/bitmap2component.exe",
     "scripting/_kipython.dll",
-    "eeschema/ngspice.dll"
+    "eeschema/ngspice.dll",
+    {
+      "src": "pcbnew/_pcbnew.pyd",
+      "dest": "Lib/site-packages/_pcbnew.pyd"
+    },
+    {
+      "src": "pcbnew/pcbnew.py",
+      "dest": "Lib/site-packages/pcbnew.py"
+    },
+    {
+      "src": "plugins/3d/oce/s3d_plugin_oce.dll",
+      "dest": "plugins/3d/s3d_plugin_oce.dll"
+    },
+    {
+      "src": "plugins/3d/vrml/s3d_plugin_vrml.dll",
+      "dest": "plugins/3d/s3d_plugin_vrml.dll"
+    },
+    {
+      "src": "plugins/3d/idf/s3d_plugin_idf.dll",
+      "dest": "plugins/3d/s3d_plugin_idf.dll"
+    }
   ]
 }

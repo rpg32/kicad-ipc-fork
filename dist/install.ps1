@@ -63,8 +63,12 @@ foreach ($proc in @("eeschema", "pcbnew", "kicad")) {
     }
 }
 
-# Files to install = basenames of the manifest entries, sourced from bin/.
-$names = $manifest.binaries | ForEach-Object { Split-Path $_ -Leaf }
+# Files to install = the manifest's destination paths (relative to the KiCad bin dir).
+# A plain-string entry installs flat by basename; an {src, dest} entry installs to
+# dest, which may include subdirectories (Lib/site-packages, plugins/3d).
+$names = $manifest.binaries | ForEach-Object {
+    if ($_ -is [string]) { Split-Path $_ -Leaf } else { $_.dest }
+}
 foreach ($n in $names) {
     if (-not (Test-Path (Join-Path $binDir $n))) { throw "Release is missing binary: bin/$n" }
 }
@@ -74,6 +78,7 @@ foreach ($n in $names) {
     $src = Join-Path $binDir $n
     $dst = Join-Path $KiCadDir $n
     $bak = "$dst.original"
+    New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force | Out-Null
     # Back up the genuine original exactly once; never overwrite an existing backup
     # (re-installing must not turn a patched DLL into the "original").
     if ((Test-Path $dst) -and -not (Test-Path $bak)) {
