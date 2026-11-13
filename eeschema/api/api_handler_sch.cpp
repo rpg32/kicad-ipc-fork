@@ -386,9 +386,6 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             symbol->Serialize( newItem );
             commit->Add( symbol.release(), screen );
 
-            if( !m_activeClients.count( aClientName ) )
-                pushCurrentCommit( aClientName, _( "Added items via API" ) );
-
             aItemHandler( status, newItem );
             continue;
         }
@@ -424,9 +421,6 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             status.set_code( ItemStatusCode::ISC_OK );
             line->Serialize( newItem );
             commit->Add( line.release(), screen );
-
-            if( !m_activeClients.count( aClientName ) )
-                pushCurrentCommit( aClientName, _( "Added items via API" ) );
 
             aItemHandler( status, newItem );
             continue;
@@ -478,9 +472,6 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
         {
             item->Serialize( newItem );
             commit->Add( item.release(), screen );
-
-            if( !m_activeClients.count( aClientName ) )
-                pushCurrentCommit( aClientName, _( "Added items via API" ) );
         }
         else
         {
@@ -490,16 +481,33 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             {
                 if( schItem->Type() == SCH_SYMBOL_T )
                 {
-                    // For symbols, apply updates field-by-field
-                    // to preserve library graphics data
+                    // For symbols, apply updates field-by-field to preserve library graphics
+                    // data, but through the same setters the Symbol Properties dialog uses.
+                    // The reference and unit of a placed symbol live in its per-sheet instance
+                    // (that is what the saver writes), so a bare field SetText / SetUnit changed
+                    // only the on-screen copy and was reverted by save.
                     SCH_SYMBOL* origSym = static_cast<SCH_SYMBOL*>( schItem );
                     SCH_SYMBOL* newSym = static_cast<SCH_SYMBOL*>( item.get() );
+                    const SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
+                    const wxString variant = m_frame->Schematic().GetCurrentVariant();
+                    int unit = newSym->GetUnit() > 0 ? newSym->GetUnit() : origSym->GetUnit();
+
+                    if( unit > std::max( 1, origSym->GetUnitCount() ) )
+                    {
+                        status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+                        status.set_error_message( fmt::format(
+                                "unit {} out of range: symbol {} has {} unit(s)", unit,
+                                origSym->m_Uuid.AsStdString(), origSym->GetUnitCount() ) );
+                        aItemHandler( status, anyItem );
+                        continue;
+                    }
 
                     commit->Modify( origSym, screen );
 
                     origSym->SetPosition( newSym->GetPosition() );
                     origSym->SetOrientation( newSym->GetOrientation() );
-                    origSym->SetUnit( newSym->GetUnit() );
+                    origSym->SetUnitSelection( &sheet, unit );
+                    origSym->SetUnit( unit );
                     origSym->SetBodyStyle( newSym->GetBodyStyle() );
 
                     // Update fields from the new item, matching by name
@@ -507,9 +515,23 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                     {
                         SCH_FIELD* origField = origSym->GetField( newField.GetName() );
 
-                        if( origField )
+                        if( !origField )
+                            continue;
+
+                        if( origField->GetId() == FIELD_T::REFERENCE )
+                            origSym->SetRef( &sheet, newField.GetText() );
+                        else if( origField->GetId() == FIELD_T::VALUE )
+                            origSym->SetValueFieldText( newField.GetText(), &sheet, variant );
+                        else
                             origField->SetText( newField.GetText() );
                     }
+
+                    // Keep value, footprint and the other shared fields, exclusion flags and
+                    // alternate pin assignments in sync across the units of a multi-unit
+                    // part, exactly as every interactive edit path does. Without this an
+                    // update of U2's footprint changed only the one unit it was sent for.
+                    origSym->SyncOtherUnits( sheet, *static_cast<SCH_COMMIT*>( commit ), nullptr,
+                                             variant );
 
                     origSym->Serialize( newItem );
                 }
@@ -524,14 +546,20 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             {
                 wxASSERT( false );
             }
-
-            if( !m_activeClients.count( aClientName ) )
-                pushCurrentCommit( aClientName, _( "Created items via API" ) );
         }
 
         aItemHandler( status, newItem );
     }
 
+    // Push once, after every item. Pushing inside the loop freed the commit (pushCurrentCommit
+    // erases it) while `commit` still pointed at it, so the second item of any multi-item
+    // CreateItems/UpdateItems wrote through a dangling pointer and crashed eeschema. Same
+    // shape as API_HANDLER_PCB, and one undo step per request.
+    if( !m_activeClients.count( aClientName ) )
+    {
+        pushCurrentCommit( aClientName, aCreate ? _( "Added items via API" )
+                                                : _( "Modified items via API" ) );
+    }
 
     return ItemRequestStatus::IRS_OK;
 }

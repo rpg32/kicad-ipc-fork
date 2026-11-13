@@ -3,6 +3,23 @@
 Prebuilt KiCad 10 binaries with extended IPC API handlers for the
 [live-view](https://github.com/rpg32/live-view) agent tooling.
 
+**v10.0.6-ipc.7** — schematic `UpdateItems` edits symbols the way the Symbol Properties dialog does.
+
+- Shared fields now stay in sync across the units of a multi-unit part
+  (`SyncOtherUnits`, called by every interactive edit path). Before, setting
+  U2's footprint over IPC changed only the one unit the update was sent for, so
+  a 7-unit 74HC14 ended up with one footprinted unit and six empty ones.
+- A Reference change is recorded in the sheet instance (`SetRef`). It used to
+  change only the field text, which the saver ignores, so a rename over IPC was
+  reverted by the next save.
+- A unit change is recorded in the sheet instance (`SetUnitSelection`) and is
+  range-checked (`ISC_INVALID_DATA`); previously it was also lost on save.
+- Value changes go through `SetValueFieldText`, so design variants are respected.
+- **Crash fix:** a schematic `CreateItems` or `UpdateItems` carrying two or more
+  items (with no explicit `BeginCommit`) crashed eeschema. The handler pushed,
+  and so freed, its commit after the first item, then used it for the next.
+  It now pushes once after the whole request (one undo step), like pcbnew.
+
 **v10.0.6-ipc.6** — schematic `CreateItems` keeps the requested unit.
 
 - Symbols created over IPC were built with no sheet, so they had no per-sheet
