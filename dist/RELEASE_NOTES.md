@@ -3,6 +3,16 @@
 Prebuilt KiCad 10 binaries with extended IPC API handlers for the
 [live-view](https://github.com/rpg32/live-view) agent tooling.
 
+**v10.0.6-ipc.6** — schematic `CreateItems` keeps the requested unit.
+
+- Symbols created over IPC were built with no sheet, so they had no per-sheet
+  instance data. The saver writes a symbol's unit from that instance, so every
+  multi-unit part placed through the API saved as unit 1 (and annotation saw
+  them as unplaced instances). `CreateItems` now creates the symbol on the
+  current sheet and records its reference and unit in the instance.
+- A unit beyond the library symbol's unit count is rejected (`ISC_INVALID_DATA`)
+  instead of producing an invalid symbol.
+
 **v10.0.6-ipc.2** — rebased from 10.0.0-rc2 onto **KiCad 10.0.6**, picking up
 1,818 upstream commits including 36 that touch the IPC API (`GetConnectedItems`,
 `FlipItems`, `GetItemsByNet`/`ByNetClass`, per-pad/via teardrop settings, zone

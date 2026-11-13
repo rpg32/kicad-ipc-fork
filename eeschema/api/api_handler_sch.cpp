@@ -304,8 +304,23 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             int unit = symMsg.unit() > 0 ? symMsg.unit() : 1;
             int bodyStyle = symMsg.body_style();
 
-            // Construct symbol the same way as interactive placement
-            auto symbol = std::make_unique<SCH_SYMBOL>( *libSymbol, libId, nullptr,
+            if( unit > std::max( 1, libSymbol->GetUnitCount() ) )
+            {
+                status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+                status.set_error_message( fmt::format( "unit {} out of range: '{}' has {} unit(s)",
+                                                       unit, std::string( libId.Format() ),
+                                                       libSymbol->GetUnitCount() ) );
+                aItemHandler( status, anyItem );
+                continue;
+            }
+
+            // Construct symbol the same way as interactive placement, *with* the sheet it is
+            // placed on. The unit and reference of a placed symbol live in its per-sheet
+            // instance data, and the saver writes the unit from that instance. Passing nullptr
+            // here left the symbol with no instance, so every save wrote the default (unit 1)
+            // and dropped the requested unit (multi-unit parts all collapsed to unit A).
+            const SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
+            auto symbol = std::make_unique<SCH_SYMBOL>( *libSymbol, libId, &sheet,
                                                         unit, bodyStyle, pos );
 
             // Apply orientation/mirror from proto
@@ -349,6 +364,11 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                     }
                 }
             }
+
+            // The Reference field override above changed only the field text; record it (and
+            // the unit) in the sheet instance, which is what is saved and what annotation reads.
+            symbol->SetRef( &sheet, symbol->GetField( FIELD_T::REFERENCE )->GetText() );
+            symbol->SetUnitSelection( &sheet, unit );
 
             // Apply exclusion flags
             symbol->SetExcludedFromBOM( symMsg.exclude_from_bom() );
