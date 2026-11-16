@@ -56,11 +56,23 @@ message LocalLabel
   Text                       text     = 3;
 }
 
+/// Electrical shape of a global or hierarchical label (LABEL_FLAG_SHAPE L_*)
+enum LabelShape
+{
+  LS_UNKNOWN       = 0;  // on create: bidirectional
+  LS_INPUT         = 1;
+  LS_OUTPUT        = 2;
+  LS_BIDIRECTIONAL = 3;
+  LS_TRI_STATE     = 4;
+  LS_PASSIVE       = 5;
+}
+
 message GlobalLabel
 {
   kiapi.common.types.KIID    id       = 1;
   kiapi.common.types.Vector2 position = 2;
   Text                       text     = 3;
+  LabelShape                 shape    = 4;
 }
 
 message HierarchicalLabel
@@ -68,6 +80,7 @@ message HierarchicalLabel
   kiapi.common.types.KIID    id       = 1;
   kiapi.common.types.Vector2 position = 2;
   Text                       text     = 3;
+  LabelShape                 shape    = 4;
 }
 
 message DirectiveLabel

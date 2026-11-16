@@ -3217,9 +3217,15 @@ SCH_SYMBOL* SCH_IO_KICAD_SEXPR_PARSER::parseSchematicSymbol()
 
         case T_convert:     // Legacy token
         case T_body_style:
-            symbol->SetBodyStyle( parseInt( "symbol body style" ) );
+        {
+            // Body styles are 1-based. Symbols created over the IPC API before v10.0.6-ipc.8 were
+            // saved with (body_style 0), which drops every pin from the symbol's connection points
+            // (a pin mid-wire never connects, its junction is deleted). Read 0 as the base style.
+            int bodyStyle = parseInt( "symbol body style" );
+            symbol->SetBodyStyle( bodyStyle > 0 ? bodyStyle : BODY_STYLE::BASE );
             NeedRIGHT();
             break;
+        }
 
         case T_exclude_from_sim:
             symbol->SetExcludedFromSim( parseBool() );

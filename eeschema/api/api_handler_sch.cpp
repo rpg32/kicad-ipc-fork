@@ -21,6 +21,8 @@
 #include <api/api_handler_sch.h>
 #include <sch_symbol.h>
 #include <sch_line.h>
+#include <sch_junction.h>
+#include <tools/sch_line_wire_bus_tool.h>
 #include <project_sch.h>
 #include <libraries/symbol_library_adapter.h>
 #include <api/api_sch_utils.h>
@@ -300,9 +302,22 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             // Extract position
             VECTOR2I pos = kiapi::common::UnpackVector2( symMsg.position() );
 
-            // Extract unit and body style
+            // Extract unit and body style. Both are 1-based; 0 is the proto default for "not
+            // given". A body style of 0 was passed straight through before, and pins (body style
+            // 1) are skipped for connection points when it differs from the symbol's, so a pin
+            // landing mid-wire never counted as connected and cleanup deleted its junction.
             int unit = symMsg.unit() > 0 ? symMsg.unit() : 1;
-            int bodyStyle = symMsg.body_style();
+            int bodyStyle = symMsg.body_style() > 0 ? symMsg.body_style() : BODY_STYLE::BASE;
+
+            if( bodyStyle > std::max( 1, libSymbol->GetBodyStyleCount() ) )
+            {
+                status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+                status.set_error_message( fmt::format(
+                        "body style {} out of range: '{}' has {} body style(s)", bodyStyle,
+                        std::string( libId.Format() ), libSymbol->GetBodyStyleCount() ) );
+                aItemHandler( status, anyItem );
+                continue;
+            }
 
             if( unit > std::max( 1, libSymbol->GetUnitCount() ) )
             {
@@ -470,8 +485,33 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
 
         if( aCreate )
         {
+            // A junction is placed the way SCH_LINE_WIRE_BUS_TOOL::AddJunction places one: on
+            // the bus layer when it sits on a bus, and breaking every wire that passes through
+            // it so the point becomes real wire endpoints. Added bare, a junction on a wire's
+            // mid-span did not connect anything there, and the commit's cleanup could delete it.
+            std::optional<VECTOR2I> junctionPos;
+
+            if( item->Type() == SCH_JUNCTION_T )
+            {
+                SCH_JUNCTION* junction = static_cast<SCH_JUNCTION*>( item.get() );
+                junctionPos = junction->GetPosition();
+
+                if( screen->GetBus( *junctionPos ) )
+                    junction->SetLayer( LAYER_BUS_JUNCTION );
+            }
+
             item->Serialize( newItem );
             commit->Add( item.release(), screen );
+
+            if( junctionPos )
+            {
+                if( SCH_LINE_WIRE_BUS_TOOL* lwbTool =
+                            m_frame->GetToolManager()->GetTool<SCH_LINE_WIRE_BUS_TOOL>() )
+                {
+                    lwbTool->BreakSegments( static_cast<SCH_COMMIT*>( commit ), *junctionPos,
+                                            screen );
+                }
+            }
         }
         else
         {
@@ -508,7 +548,12 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                     origSym->SetOrientation( newSym->GetOrientation() );
                     origSym->SetUnitSelection( &sheet, unit );
                     origSym->SetUnit( unit );
-                    origSym->SetBodyStyle( newSym->GetBodyStyle() );
+                    // 0 = not given: keep the current body style (and repair a 0 left by
+                    // symbols created over the API before body style defaulted to 1).
+                    if( newSym->GetBodyStyle() > 0 )
+                        origSym->SetBodyStyle( newSym->GetBodyStyle() );
+                    else if( origSym->GetBodyStyle() <= 0 )
+                        origSym->SetBodyStyle( BODY_STYLE::BASE );
 
                     // Update fields from the new item, matching by name
                     for( SCH_FIELD& newField : newSym->GetFields() )

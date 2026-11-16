@@ -3,6 +3,24 @@
 Prebuilt KiCad 10 binaries with extended IPC API handlers for the
 [live-view](https://github.com/rpg32/live-view) agent tooling.
 
+**v10.0.6-ipc.8** — symbols placed over IPC connect properly; junctions and global labels work.
+
+- **Body style:** `CreateItems` passed the proto default body style 0 straight
+  through to new symbols. Body styles are 1-based, and a symbol's connection points
+  skip every pin whose body style differs from the symbol's. So a pin landing on a
+  wire's mid-span never connected, and cleanup deleted the junction placed there.
+  New symbols now default to body style 1 (out-of-range values return
+  `ISC_INVALID_DATA`). `UpdateItems` keeps the current style when none is given and
+  repairs a 0. The file reader reads `(body_style 0)` as 1, so schematics saved by
+  ipc.2–ipc.7 are repaired on load and fixed on the next save.
+- **Junctions:** `CreateItems` now places a junction the way the GUI does: on the
+  bus layer when it sits on a bus, and splitting every wire that passes through it.
+- **Global and hierarchical labels:** their (de)serializers were unimplemented
+  stubs, so creating one failed with "could not unpack SCH_GLOBALLABEL". Both are
+  implemented, with a new `shape` field (`LabelShape`: input, output,
+  bidirectional, tri-state, passive). Regenerate client bindings from this release's
+  protos.
+
 **v10.0.6-ipc.7** — schematic `UpdateItems` edits symbols the way the Symbol Properties dialog does.
 
 - Shared fields now stay in sync across the units of a multi-unit part

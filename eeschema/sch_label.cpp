@@ -58,6 +58,40 @@
 #include <properties/property_mgr.h>
 
 
+// Global and hierarchical labels carry an electrical shape; map it to and from the API enum.
+static kiapi::schematic::types::LabelShape labelShapeToProto( LABEL_FLAG_SHAPE aShape )
+{
+    using namespace kiapi::schematic::types;
+
+    switch( aShape )
+    {
+    case LABEL_FLAG_SHAPE::L_INPUT:       return LS_INPUT;
+    case LABEL_FLAG_SHAPE::L_OUTPUT:      return LS_OUTPUT;
+    case LABEL_FLAG_SHAPE::L_BIDI:        return LS_BIDIRECTIONAL;
+    case LABEL_FLAG_SHAPE::L_TRISTATE:    return LS_TRI_STATE;
+    case LABEL_FLAG_SHAPE::L_UNSPECIFIED: return LS_PASSIVE;
+    default:                              return LS_UNKNOWN;
+    }
+}
+
+
+static LABEL_FLAG_SHAPE labelShapeFromProto( kiapi::schematic::types::LabelShape aShape,
+                                             LABEL_FLAG_SHAPE aDefault )
+{
+    using namespace kiapi::schematic::types;
+
+    switch( aShape )
+    {
+    case LS_INPUT:         return LABEL_FLAG_SHAPE::L_INPUT;
+    case LS_OUTPUT:        return LABEL_FLAG_SHAPE::L_OUTPUT;
+    case LS_BIDIRECTIONAL: return LABEL_FLAG_SHAPE::L_BIDI;
+    case LS_TRI_STATE:     return LABEL_FLAG_SHAPE::L_TRISTATE;
+    case LS_PASSIVE:       return LABEL_FLAG_SHAPE::L_UNSPECIFIED;
+    default:               return aDefault;
+    }
+}
+
+
 /* Coding polygons for global symbol graphic shapes.
  *  the first parml is the number of corners
  *  others are the corners coordinates in reduced units
@@ -2046,14 +2080,32 @@ SCH_GLOBALLABEL::SCH_GLOBALLABEL( const SCH_GLOBALLABEL& aGlobalLabel ) :
 
 void SCH_GLOBALLABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    UNIMPLEMENTED_FOR( GetClass() );
+    kiapi::schematic::types::GlobalLabel label;
+
+    label.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+    label.mutable_text()->mutable_text()->set_text( GetText().ToUTF8() );
+    label.set_shape( labelShapeToProto( GetShape() ) );
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_GLOBALLABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    UNIMPLEMENTED_FOR( GetClass() );
-    return false;
+    kiapi::schematic::types::GlobalLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( label.position() ) );
+
+    if( label.has_text() && label.text().has_text() )
+        SetText( wxString::FromUTF8( label.text().text().text() ) );
+
+    SetShape( labelShapeFromProto( label.shape(), GetShape() ) );
+    return true;
 }
 
 
@@ -2263,14 +2315,32 @@ SCH_HIERLABEL::SCH_HIERLABEL( const VECTOR2I& pos, const wxString& text, KICAD_T
 
 void SCH_HIERLABEL::Serialize( google::protobuf::Any& aContainer ) const
 {
-    UNIMPLEMENTED_FOR( GetClass() );
+    kiapi::schematic::types::HierarchicalLabel label;
+
+    label.mutable_id()->set_value( m_Uuid.AsStdString() );
+    kiapi::common::PackVector2( *label.mutable_position(), GetPosition() );
+    label.mutable_text()->mutable_text()->set_text( GetText().ToUTF8() );
+    label.set_shape( labelShapeToProto( GetShape() ) );
+
+    aContainer.PackFrom( label );
 }
 
 
 bool SCH_HIERLABEL::Deserialize( const google::protobuf::Any& aContainer )
 {
-    UNIMPLEMENTED_FOR( GetClass() );
-    return false;
+    kiapi::schematic::types::HierarchicalLabel label;
+
+    if( !aContainer.UnpackTo( &label ) )
+        return false;
+
+    const_cast<KIID&>( m_Uuid ) = KIID( label.id().value() );
+    SetPosition( kiapi::common::UnpackVector2( label.position() ) );
+
+    if( label.has_text() && label.text().has_text() )
+        SetText( wxString::FromUTF8( label.text().text().text() ) );
+
+    SetShape( labelShapeFromProto( label.shape(), GetShape() ) );
+    return true;
 }
 
 
