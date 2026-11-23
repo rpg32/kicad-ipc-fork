@@ -22,6 +22,7 @@ syntax = "proto3";
 package kiapi.schematic.commands;
 
 import "common/types/base_types.proto";
+import "common/types/enums.proto";
 
 // Requests a list of nets in the schematic
 message GetNets
@@ -130,4 +131,84 @@ message AnnotateSymbolsResponse
 
   // Annotation errors KiCad's own check reports afterwards (duplicates, unit mismatches, ...)
   repeated string errors = 3;
+}
+
+
+// Geometry of the sheet shown in the editor, as KiCad itself computes it: where each
+// symbol's body and pins are and the area every text occupies.  Coordinates are in the
+// same units as the rest of the schematic API.  This is what a client needs to wire to a
+// pin, or to judge whether a schematic is readable (texts overlapping, wires drawn across
+// a symbol), without re-deriving KiCad's symbol transforms and font metrics.
+message GetSheetGeometry
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+
+  // Symbols to report.  Empty: every symbol on the sheet, and the other items too.
+  repeated kiapi.common.types.KIID symbols = 2;
+}
+
+message PinGeometry
+{
+  string number = 1;
+  string name = 2;
+
+  // The point a wire connects to
+  kiapi.common.types.Vector2 position = 3;
+
+  // KiCad's canonical name: input, output, bidirectional, tri_state, passive, free,
+  // unspecified, power_in, power_out, open_collector, open_emitter, no_connect
+  string electrical_type = 4;
+
+  bool visible = 5;
+
+  // The alternate function assigned to this pin ("" = none), and those it offers
+  string alternate = 6;
+  repeated string alternates = 7;
+}
+
+message FieldGeometry
+{
+  kiapi.common.types.KIID id = 1;
+  string name = 2;
+
+  // The text as drawn
+  string text = 3;
+  bool visible = 4;
+  kiapi.common.types.Box2 box = 5;
+}
+
+message SymbolGeometry
+{
+  kiapi.common.types.KIID id = 1;
+  string reference = 2;
+  int32 unit = 3;
+
+  // The body graphics alone: no pins, no fields
+  kiapi.common.types.Box2 body = 4;
+  kiapi.common.types.Box2 body_and_pins = 5;
+
+  repeated PinGeometry pins = 6;
+  repeated FieldGeometry fields = 7;
+
+  // A power symbol (GND, +5V, ...)
+  bool power = 8;
+}
+
+message ItemGeometry
+{
+  kiapi.common.types.KIID id = 1;
+  kiapi.common.types.KiCadObjectType type = 2;
+  kiapi.common.types.Box2 box = 3;
+
+  // The text as drawn, for labels and text items
+  string text = 4;
+}
+
+message GetSheetGeometryResponse
+{
+  repeated SymbolGeometry symbols = 1;
+
+  // Labels, text, text boxes, sheets, junctions, no-connect flags, shapes, images and
+  // tables.  Not symbols (above) and not wires (GetItems has their end points).
+  repeated ItemGeometry items = 2;
 }

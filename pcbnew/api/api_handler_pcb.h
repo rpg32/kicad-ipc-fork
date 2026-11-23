@@ -163,6 +163,12 @@ private:
 
     HANDLER_RESULT<DragItemsResponse> handleDragItems( const HANDLER_CONTEXT<DragItems>& aCtx );
 
+    HANDLER_RESULT<BoardDesignConstraints> handleGetBoardDesignConstraints(
+            const HANDLER_CONTEXT<GetBoardDesignConstraints>& aCtx );
+
+    HANDLER_RESULT<BoardDesignConstraints> handleSetBoardDesignConstraints(
+            const HANDLER_CONTEXT<SetBoardDesignConstraints>& aCtx );
+
     HANDLER_RESULT<commands::SavedDocumentResponse> handleSaveDocumentToString(
                 const HANDLER_CONTEXT<commands::SaveDocumentToString>& aCtx );
 

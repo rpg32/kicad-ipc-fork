@@ -58,6 +58,7 @@
 #include <tool/tool_manager.h>
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
+#include <tools/drc_tool.h>
 #include <zone.h>
 #include <router/pns_router.h>
 #include <router/router_tool.h>
@@ -165,6 +166,10 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
             &API_HANDLER_PCB::handleInjectDrcError );
     registerHandler<RouteTrack, RouteTrackResponse>( &API_HANDLER_PCB::handleRouteTrack );
     registerHandler<DragItems, DragItemsResponse>( &API_HANDLER_PCB::handleDragItems );
+    registerHandler<GetBoardDesignConstraints, BoardDesignConstraints>(
+            &API_HANDLER_PCB::handleGetBoardDesignConstraints );
+    registerHandler<SetBoardDesignConstraints, BoardDesignConstraints>(
+            &API_HANDLER_PCB::handleSetBoardDesignConstraints );
 }
 
 
@@ -3500,5 +3505,146 @@ HANDLER_RESULT<InjectDrcErrorResponse> API_HANDLER_PCB::handleInjectDrcError(
     InjectDrcErrorResponse response;
     response.mutable_marker()->set_value( marker->GetUUID().AsStdString() );
 
+    return response;
+}
+
+
+namespace
+{
+/// The constraints of Board Setup > Design Rules > Constraints, by proto field.
+struct CONSTRAINT_FIELD
+{
+    const char* name;
+    int BOARD_DESIGN_SETTINGS::* member;
+    bool ( BoardDesignConstraints::*has )() const;
+    const kiapi::common::types::Distance& ( BoardDesignConstraints::*get )() const;
+    kiapi::common::types::Distance* ( BoardDesignConstraints::*mut )();
+};
+
+#define LV_CONSTRAINT( protoName, member )                                                        \
+    { #protoName, &BOARD_DESIGN_SETTINGS::member, &BoardDesignConstraints::has_##protoName,        \
+      &BoardDesignConstraints::protoName, &BoardDesignConstraints::mutable_##protoName }
+
+const CONSTRAINT_FIELD s_constraintFields[] = {
+    LV_CONSTRAINT( min_clearance, m_MinClearance ),
+    LV_CONSTRAINT( min_track_width, m_TrackMinWidth ),
+    LV_CONSTRAINT( min_connection_width, m_MinConn ),
+    LV_CONSTRAINT( min_annular_width, m_ViasMinAnnularWidth ),
+    LV_CONSTRAINT( min_via_diameter, m_ViasMinSize ),
+    LV_CONSTRAINT( copper_to_hole_clearance, m_HoleClearance ),
+    LV_CONSTRAINT( copper_to_edge_clearance, m_CopperEdgeClearance ),
+    LV_CONSTRAINT( min_through_hole, m_MinThroughDrill ),
+    LV_CONSTRAINT( hole_to_hole, m_HoleToHoleMin ),
+    LV_CONSTRAINT( min_microvia_diameter, m_MicroViasMinSize ),
+    LV_CONSTRAINT( min_microvia_drill, m_MicroViasMinDrill ),
+    LV_CONSTRAINT( silk_clearance, m_SilkClearance ),
+    LV_CONSTRAINT( min_silk_text_height, m_MinSilkTextHeight ),
+    LV_CONSTRAINT( min_silk_text_thickness, m_MinSilkTextThickness ),
+};
+
+#undef LV_CONSTRAINT
+
+void packConstraints( BoardDesignConstraints& aOut, const BOARD_DESIGN_SETTINGS& aSettings )
+{
+    for( const CONSTRAINT_FIELD& f : s_constraintFields )
+        ( aOut.*( f.mut ) )()->set_value_nm( aSettings.*( f.member ) );
+}
+} // namespace
+
+
+HANDLER_RESULT<BoardDesignConstraints> API_HANDLER_PCB::handleGetBoardDesignConstraints(
+        const HANDLER_CONTEXT<GetBoardDesignConstraints>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    BoardDesignConstraints response;
+    packConstraints( response, frame()->GetBoard()->GetDesignSettings() );
+    return response;
+}
+
+
+HANDLER_RESULT<BoardDesignConstraints> API_HANDLER_PCB::handleSetBoardDesignConstraints(
+        const HANDLER_CONTEXT<SetBoardDesignConstraints>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    const BoardDesignConstraints& wanted = aCtx.Request.constraints();
+    BOARD_DESIGN_SETTINGS&        settings = frame()->GetBoard()->GetDesignSettings();
+
+    // Check everything before changing anything.
+    for( const CONSTRAINT_FIELD& f : s_constraintFields )
+    {
+        if( !( wanted.*( f.has ) )() )
+            continue;
+
+        const int64_t value = ( wanted.*( f.get ) )().value_nm();
+
+        if( value < 0 || value > std::numeric_limits<int>::max() )
+        {
+            ApiResponseStatus e;
+            e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+            e.set_error_message( fmt::format( "{} = {} nm is out of range; nothing was changed",
+                                              f.name, value ) );
+            return tl::unexpected( e );
+        }
+    }
+
+    bool changed = false;
+
+    for( const CONSTRAINT_FIELD& f : s_constraintFields )
+    {
+        if( !( wanted.*( f.has ) )() )
+            continue;
+
+        const int value = static_cast<int>( ( wanted.*( f.get ) )().value_nm() );
+
+        if( settings.*( f.member ) != value )
+        {
+            settings.*( f.member ) = value;
+            changed = true;
+        }
+    }
+
+    if( changed )
+    {
+        // What closing Board Setup does: the board needs saving (the constraints live in the
+        // project file, written with the board), the DRC engine rebuilds the rules it derives
+        // from them, and the router reloads its design rules.
+        frame()->OnModify();
+
+        try
+        {
+            if( DRC_TOOL* drcTool = frame()->GetToolManager()->GetTool<DRC_TOOL>() )
+                drcTool->GetDRCEngine()->InitEngine( frame()->GetDesignRulesPath() );
+        }
+        catch( PARSE_ERROR& )
+        {
+            // The board's custom rules file does not parse; that is not this request's doing.
+        }
+
+        PCB_EDIT_FRAME* f = frame();
+
+        f->CallAfter( [f]()
+                      {
+                          TOOL_EVENT toolEvent( TC_COMMAND, TA_MODEL_CHANGE, AS_ACTIVE );
+                          toolEvent.SetHasPosition( false );
+                          f->GetToolManager()->ProcessEvent( toolEvent );
+                          f->GetCanvas()->Refresh();
+                      } );
+    }
+
+    BoardDesignConstraints response;
+    packConstraints( response, settings );
     return response;
 }

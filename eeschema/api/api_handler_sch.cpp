@@ -20,6 +20,9 @@
 
 #include <api/api_handler_sch.h>
 #include <sch_symbol.h>
+#include <sch_pin.h>
+#include <sch_field.h>
+#include <eda_text.h>
 #include <sch_line.h>
 #include <sch_junction.h>
 #include <tools/sch_line_wire_bus_tool.h>
@@ -85,6 +88,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( SCH_EDIT_FRAME* aFrame ) :
             &API_HANDLER_SCH::handleGetSheetHierarchy );
     registerHandler<AnnotateSymbols, AnnotateSymbolsResponse>(
             &API_HANDLER_SCH::handleAnnotateSymbols );
+    registerHandler<GetSheetGeometry, GetSheetGeometryResponse>(
+            &API_HANDLER_SCH::handleGetSheetGeometry );
 }
 
 
@@ -179,6 +184,73 @@ HANDLER_RESULT<std::unique_ptr<EDA_ITEM>> API_HANDLER_SCH::createItemForType( KI
 
     return created;
 }
+
+
+namespace
+{
+/**
+ * The library symbol for @a aLibId, loaded the way symbol linking loads it when a schematic is
+ * opened, or nullptr with the reason in @a aLoadError.
+ *
+ * Libraries load in the background after the editor opens (a minute on a busy machine). A
+ * request that arrives before its library is in was told "library symbol not found" about a
+ * symbol that exists. Make sure that one library is in: wait while a background worker is
+ * parsing it right now (two parsers on one library's cache is not safe), otherwise load it
+ * here.
+ */
+LIB_SYMBOL* loadLibrarySymbol( SCH_EDIT_FRAME* aFrame, const LIB_ID& aLibId, wxString& aLoadError )
+{
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &aFrame->Prj() );
+
+    if( !adapter )
+        return nullptr;
+
+    try
+    {
+        const wxString nickname = aLibId.GetLibNickname();
+
+        for( int waited = 0; waited < 30000; waited += 20 )
+        {
+            std::optional<LIB_STATUS> state = adapter->GetLibraryStatus( nickname );
+
+            if( !state || state->load_status != LOAD_STATUS::LOADING )
+                break;
+
+            wxMilliSleep( 20 );
+        }
+
+        if( !adapter->IsLibraryLoaded( nickname ) )
+        {
+            std::optional<LIB_STATUS> loaded = adapter->LoadOne( nickname );
+
+            if( loaded && loaded->load_status != LOAD_STATUS::LOADED )
+            {
+                aLoadError = loaded->error ? loaded->error->message
+                                           : wxString( wxT( "the library could not be loaded" ) );
+            }
+        }
+
+        return adapter->LoadSymbol( aLibId );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        aLoadError = ioe.What();
+        return nullptr;
+    }
+}
+
+
+/// Says which it is: a library that failed to load, or a symbol that library does not have.
+std::string libSymbolNotFoundMessage( const LIB_ID& aLibId, const wxString& aLoadError )
+{
+    if( aLoadError.IsEmpty() )
+        return fmt::format( "library symbol '{}' not found", std::string( aLibId.Format() ) );
+
+    return fmt::format( "library symbol '{}' not found: library '{}': {}",
+                        std::string( aLibId.Format() ), std::string( aLibId.GetLibNickname() ),
+                        aLoadError.ToStdString() );
+}
+} // namespace
 
 
 HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsInternal( bool aCreate,
@@ -284,71 +356,14 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             }
 
             // Load library symbol — same path as interactive placement
-            SYMBOL_LIBRARY_ADAPTER* adapter =
-                    PROJECT_SCH::SymbolLibAdapter( &m_frame->Prj() );
-            LIB_SYMBOL* libSymbol = nullptr;
             wxString    loadError;
-
-            if( adapter )
-            {
-                try
-                {
-                    // Libraries load in the background after the editor opens (a minute on a
-                    // busy machine). A request that arrives before its library is in was told
-                    // "library symbol not found" about a symbol that exists. Make sure that one
-                    // library is in: wait while a background worker is parsing it right now
-                    // (two parsers on one library's cache is not safe), otherwise load it here,
-                    // as symbol linking does when a schematic is opened.
-                    const wxString nickname = libId.GetLibNickname();
-
-                    for( int waited = 0; waited < 30000; waited += 20 )
-                    {
-                        std::optional<LIB_STATUS> state = adapter->GetLibraryStatus( nickname );
-
-                        if( !state || state->load_status != LOAD_STATUS::LOADING )
-                            break;
-
-                        wxMilliSleep( 20 );
-                    }
-
-                    if( !adapter->IsLibraryLoaded( nickname ) )
-                    {
-                        std::optional<LIB_STATUS> loaded = adapter->LoadOne( nickname );
-
-                        if( loaded && loaded->load_status != LOAD_STATUS::LOADED )
-                        {
-                            loadError = loaded->error ? loaded->error->message
-                                                      : wxString( wxT( "the library could not be loaded" ) );
-                        }
-                    }
-
-                    libSymbol = adapter->LoadSymbol( libId );
-                }
-                catch( const IO_ERROR& ioe )
-                {
-                    libSymbol = nullptr;
-                    loadError = ioe.What();
-                }
-            }
+            LIB_SYMBOL* libSymbol = loadLibrarySymbol( m_frame, libId, loadError );
 
             if( !libSymbol )
             {
                 status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
 
-                // Say which it is: a library that failed to load, or a symbol that library
-                // does not have.
-                if( loadError.IsEmpty() )
-                {
-                    status.set_error_message( fmt::format( "library symbol '{}' not found",
-                                                           std::string( libId.Format() ) ) );
-                }
-                else
-                {
-                    status.set_error_message( fmt::format(
-                            "library symbol '{}' not found: library '{}': {}",
-                            std::string( libId.Format() ),
-                            std::string( libId.GetLibNickname() ), loadError.ToStdString() ) );
-                }
+                status.set_error_message( libSymbolNotFoundMessage( libId, loadError ) );
 
                 aItemHandler( status, anyItem );
                 continue;
@@ -444,6 +459,12 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             symbol->SetExcludedFromBOM( symMsg.exclude_from_bom() );
             symbol->SetExcludedFromBoard( symMsg.exclude_from_board() );
             symbol->SetDNP( symMsg.dnp() );
+
+            // Place the fields as interactive placement does: Reference and Value clear of the
+            // body for this orientation. The library's field positions, merely turned with the
+            // symbol, put the texts on or against the body of a rotated part.
+            if( m_frame->eeconfig()->m_AutoplaceFields.enable )
+                symbol->AutoplaceFields( nullptr, AUTOPLACE_AUTO );
 
             // Add flattened lib symbol to screen cache (needed for file save)
             std::unique_ptr<LIB_SYMBOL> flatSymbol = libSymbol->Flatten();
@@ -670,20 +691,88 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
                     const wxString variant = m_frame->Schematic().GetCurrentVariant();
                     int unit = newSym->GetUnit() > 0 ? newSym->GetUnit() : origSym->GetUnit();
 
-                    if( unit > std::max( 1, origSym->GetUnitCount() ) )
+                    // Another library identifier is a request to change the symbol to that
+                    // library symbol, as the Change Symbols dialog does for one symbol: body
+                    // and pins come from the new library symbol, the placed symbol keeps its
+                    // position, unit and field texts.
+                    const LIB_ID                newLibId = newSym->GetLibId();
+                    std::unique_ptr<LIB_SYMBOL> replacement;
+
+                    if( newLibId.IsValid() && newLibId != origSym->GetLibId() )
+                    {
+                        wxString    loadError;
+                        LIB_SYMBOL* libSymbol = loadLibrarySymbol( m_frame, newLibId, loadError );
+
+                        if( !libSymbol )
+                        {
+                            status.set_code( ItemStatusCode::ISC_INVALID_DATA );
+                            status.set_error_message( libSymbolNotFoundMessage( newLibId, loadError ) );
+                            aItemHandler( status, anyItem );
+                            continue;
+                        }
+
+                        replacement = libSymbol->Flatten();
+                    }
+
+                    const int unitCount = replacement ? replacement->GetUnitCount()
+                                                      : origSym->GetUnitCount();
+
+                    if( unit > std::max( 1, unitCount ) )
                     {
                         status.set_code( ItemStatusCode::ISC_INVALID_DATA );
                         status.set_error_message( fmt::format(
-                                "unit {} out of range: symbol {} has {} unit(s)", unit,
-                                origSym->m_Uuid.AsStdString(), origSym->GetUnitCount() ) );
+                                "unit {} out of range: {} has {} unit(s)", unit,
+                                replacement ? "'" + std::string( newLibId.Format() ) + "'"
+                                            : "symbol " + origSym->m_Uuid.AsStdString(),
+                                unitCount ) );
                         aItemHandler( status, anyItem );
                         continue;
                     }
 
-                    commit->Modify( origSym, screen );
+                    if( replacement )
+                    {
+                        // Off the screen while its library symbol changes, as the dialog does,
+                        // so the screen does not keep the old library symbol for it.
+                        screen->Remove( origSym );
+                        commit->Modified( origSym, origSym->Clone(), screen );
+
+                        origSym->SetLibId( newLibId );
+                        origSym->SetLibSymbol( replacement.release() );
+                        origSym->SetSchSymbolLibraryName( wxEmptyString );
+
+                        // An alternate pin function the new symbol does not offer is dropped.
+                        for( SCH_PIN* pin : origSym->GetPins( &sheet ) )
+                        {
+                            if( !pin->GetAlt().IsEmpty()
+                                && pin->GetAlternates().count( pin->GetAlt() ) == 0 )
+                            {
+                                pin->SetAlt( wxEmptyString );
+                            }
+                        }
+
+                        screen->Append( origSym );
+                    }
+                    else
+                    {
+                        commit->Modify( origSym, screen );
+                    }
+
+                    const int oldOrientation = origSym->GetOrientation();
 
                     origSym->SetPosition( newSym->GetPosition() );
                     origSym->SetOrientation( newSym->GetOrientation() );
+
+                    // Turning or mirroring a symbol re-places its automatically placed fields,
+                    // as the editor's own rotate does. Fields a user or a client positioned
+                    // (AUTOPLACE_NONE) stay where they were put.
+                    if( origSym->GetOrientation() != oldOrientation
+                        && m_frame->eeconfig()->m_AutoplaceFields.enable )
+                    {
+                        AUTOPLACE_ALGO fieldsAutoplaced = origSym->GetFieldsAutoplaced();
+
+                        if( fieldsAutoplaced == AUTOPLACE_AUTO || fieldsAutoplaced == AUTOPLACE_MANUAL )
+                            origSym->AutoplaceFields( screen, fieldsAutoplaced );
+                    }
                     origSym->SetUnitSelection( &sheet, unit );
                     origSym->SetUnit( unit );
                     // 0 = not given: keep the current body style (and repair a 0 left by
@@ -1241,6 +1330,113 @@ API_HANDLER_SCH::handleAnnotateSymbols(
 
     for( const wxString& error : reporter.m_errors )
         response.add_errors( error.ToStdString() );
+
+    return response;
+}
+
+
+HANDLER_RESULT<kiapi::schematic::commands::GetSheetGeometryResponse>
+API_HANDLER_SCH::handleGetSheetGeometry(
+        const HANDLER_CONTEXT<kiapi::schematic::commands::GetSheetGeometry>& aCtx )
+{
+    using namespace kiapi::schematic::commands;
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    std::set<KIID> wanted;
+
+    for( const kiapi::common::types::KIID& id : aCtx.Request.symbols() )
+        wanted.insert( KIID( id.value() ) );
+
+    SCH_SCREEN*              screen = m_frame->GetScreen();
+    const SCH_SHEET_PATH&    sheet = m_frame->GetCurrentSheet();
+    GetSheetGeometryResponse response;
+
+    for( SCH_ITEM* item : screen->Items() )
+    {
+        if( item->Type() == SCH_SYMBOL_T )
+        {
+            SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+
+            if( !wanted.empty() && !wanted.count( symbol->m_Uuid ) )
+                continue;
+
+            SymbolGeometry* out = response.add_symbols();
+            out->mutable_id()->set_value( symbol->m_Uuid.AsStdString() );
+            out->set_reference( symbol->GetRef( &sheet ).ToUTF8().data() );
+            out->set_unit( symbol->GetUnitSelection( &sheet ) );
+            out->set_power( symbol->IsPower() );
+            kiapi::common::PackBox2( *out->mutable_body(), symbol->GetBodyBoundingBox() );
+            kiapi::common::PackBox2( *out->mutable_body_and_pins(),
+                                     symbol->GetBodyAndPinsBoundingBox() );
+
+            for( SCH_PIN* pin : symbol->GetPins( &sheet ) )
+            {
+                PinGeometry* p = out->add_pins();
+                p->set_number( pin->GetShownNumber().ToUTF8().data() );
+                p->set_name( pin->GetShownName().ToUTF8().data() );
+                kiapi::common::PackVector2( *p->mutable_position(), pin->GetPosition() );
+                p->set_electrical_type( pin->GetCanonicalElectricalTypeName().ToUTF8().data() );
+                p->set_visible( pin->IsVisible() );
+                p->set_alternate( pin->GetAlt().ToUTF8().data() );
+
+                for( const auto& [name, alt] : pin->GetAlternates() )
+                    p->add_alternates( name.ToUTF8().data() );
+            }
+
+            for( SCH_FIELD& field : symbol->GetFields() )
+            {
+                FieldGeometry* f = out->add_fields();
+                f->mutable_id()->set_value( field.m_Uuid.AsStdString() );
+                f->set_name( field.GetName().ToUTF8().data() );
+                f->set_text( field.GetShownText( &sheet, false ).ToUTF8().data() );
+                f->set_visible( field.IsVisible() );
+                kiapi::common::PackBox2( *f->mutable_box(), field.GetBoundingBox() );
+            }
+
+            continue;
+        }
+
+        if( !wanted.empty() )
+            continue;
+
+        switch( item->Type() )
+        {
+        case SCH_LABEL_T:
+        case SCH_GLOBAL_LABEL_T:
+        case SCH_HIER_LABEL_T:
+        case SCH_DIRECTIVE_LABEL_T:
+        case SCH_TEXT_T:
+        case SCH_TEXTBOX_T:
+        case SCH_SHEET_T:
+        case SCH_JUNCTION_T:
+        case SCH_NO_CONNECT_T:
+        case SCH_SHAPE_T:
+        case SCH_BITMAP_T:
+        case SCH_TABLE_T:
+        {
+            ItemGeometry* out = response.add_items();
+            out->mutable_id()->set_value( item->m_Uuid.AsStdString() );
+            out->set_type( ToProtoEnum<KICAD_T, kiapi::common::types::KiCadObjectType>(
+                    item->Type() ) );
+            kiapi::common::PackBox2( *out->mutable_box(), item->GetBoundingBox() );
+
+            if( EDA_TEXT* text = dynamic_cast<EDA_TEXT*>( item ) )
+                out->set_text( text->GetShownText( false ).ToUTF8().data() );
+
+            break;
+        }
+
+        default:
+            break;
+        }
+    }
 
     return response;
 }

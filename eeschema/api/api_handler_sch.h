@@ -105,6 +105,9 @@ private:
     HANDLER_RESULT<kiapi::schematic::commands::AnnotateSymbolsResponse> handleAnnotateSymbols(
             const HANDLER_CONTEXT<kiapi::schematic::commands::AnnotateSymbols>& aCtx );
 
+    HANDLER_RESULT<kiapi::schematic::commands::GetSheetGeometryResponse> handleGetSheetGeometry(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::GetSheetGeometry>& aCtx );
+
     SCH_EDIT_FRAME* m_frame;
 };
 

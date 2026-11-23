@@ -15,7 +15,8 @@ forget it.
 - `local-ipc-fixes` (local) is the original shallow-clone dev branch. It is kept
   for reference only; it cannot be pushed (shallow). Don't develop on it anymore.
 
-So: **edit on `publish-10.0.6`, commit, `git push`** (upstream is already set).
+So: **edit on `publish-10.0.6`, commit, `git push fork publish-10.0.6:local-ipc-fixes`**.
+A bare `git push` is refused, because the local and remote branch names differ.
 
 ## Routine update — docs / scripts only (no binary change)
 
@@ -23,7 +24,7 @@ So: **edit on `publish-10.0.6`, commit, `git push`** (upstream is already set).
 git checkout publish-10.0.6
 # edit dist/*, README, etc.
 git add -A && git commit -m "..."
-git push                      # → fork/local-ipc-fixes
+git push fork publish-10.0.6:local-ipc-fixes
 ```
 No new release needed unless you want to refresh the attached zip.
 
@@ -40,7 +41,17 @@ No new release needed unless you want to refresh the attached zip.
    missing, follow upstream KiCad's `INSTALL.txt` to configure it once
    (vcpkg + MSVC on Windows). Expect a long first build; incrementals are minutes.
 
-3. **Deploy locally and test** (elevated PowerShell, KiCad closed):
+3. **Test in a private copy first** (no elevation, the installed KiCad untouched):
+   ```powershell
+   pwsh dist\test-install.ps1    # copy of the install + this build, in %LOCALAPPDATA%\live-view\kicad-fork-test
+   $env:LIVEVIEW_KICAD_BIN = "$env:LOCALAPPDATA\live-view\kicad-fork-test\bin"
+   node <live-view>\mcp\test-kicad-regression.mjs ; node <live-view>\mcp\bench-e2e.mjs
+   pwsh dist\test-install.ps1 -Remove
+   ```
+   The live-view suites open their editors from that copy, on a hidden desktop. Installing
+   interrupts everyone using KiCad on the machine, so do it once, after the suites pass.
+
+   **Then deploy locally** (elevated PowerShell, KiCad closed):
    ```powershell
    pwsh dist\install.ps1          # copies build output over your install, backs up originals
    ```
@@ -72,7 +83,7 @@ No new release needed unless you want to refresh the attached zip.
 6. **Commit, push, and cut a release:**
    ```bash
    git add -A && git commit -m "eeschema: <what changed>"
-   git push
+   git push fork publish-10.0.6:local-ipc-fixes
    gh release create <forkVersion> "dist/release/kicad-ipc-fork-<forkVersion>.zip" \
        --repo rpg32/kicad-ipc-fork --target local-ipc-fixes \
        --title "<forkVersion>" --notes-file dist/RELEASE_NOTES.md

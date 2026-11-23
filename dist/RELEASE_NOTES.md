@@ -3,6 +3,31 @@
 Prebuilt KiCad 10 binaries with extended IPC API handlers for the
 [live-view](https://github.com/rpg32/live-view) agent tooling.
 
+**v10.0.6-ipc.10** — KiCad's own geometry for a schematic sheet, changing a symbol and the board's design constraints over IPC.
+
+- **`GetSheetGeometry`** (new, `schematic_commands.proto`): for the sheet shown, each
+  symbol's body box, its pins (number, name, electrical type, the point a wire connects
+  to, alternate functions) and the box every field occupies, plus the boxes of labels,
+  text, sheets and the other non-wire items. A client can wire to a pin without saving
+  and parsing the file, and can judge whether a drawing is readable (texts overlapping,
+  wires across a symbol) from KiCad's symbol transforms and font metrics, not its own.
+- **Change a symbol:** `UpdateItems` on a `SchematicSymbol` whose library identifier
+  differs changes it to that library symbol, as the Change Symbols dialog does for one
+  symbol: body and pins come from the new symbol; position, unit and field texts stay.
+  An unknown symbol or one with too few units is refused (`ISC_INVALID_DATA`).
+- **Fields placed as the editor places them:** a symbol created over IPC, or turned or
+  mirrored by `UpdateItems`, has its automatically placed fields re-placed for the new
+  orientation (when the editor's autoplace setting is on), as interactive placement and
+  rotate do. Before, the library's field positions were only rotated with the symbol,
+  which put Reference and Value on or against the body of a rotated part. Fields a user
+  or a client positioned are left where they are.
+- **`GetBoardDesignConstraints` / `SetBoardDesignConstraints`** (new,
+  `board_commands.proto`): the minimums of Board Setup > Design Rules > Constraints.
+  Setting changes only the constraints present in the request, marks the board modified,
+  and rebuilds the rules the DRC and the router work from, as closing Board Setup does.
+- Regenerate client bindings from this release's protos (new messages only; bindings
+  generated from ipc.10 work against ipc.9).
+
 **v10.0.6-ipc.9** — symbols can be placed the moment the editor opens; annotation and field placement over IPC.
 
 - **Library on demand:** symbol libraries load in the background after the

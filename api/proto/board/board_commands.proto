@@ -593,3 +593,39 @@ message DragItemsResponse
   repeated kiapi.common.types.KIID created_items = 4;  // segments the shove added
   repeated kiapi.common.types.KIID deleted_items = 5;  // segments the shove merged away
 }
+
+
+// The minimums of Board Setup > Design Rules > Constraints.
+message BoardDesignConstraints
+{
+  kiapi.common.types.Distance min_clearance            = 1;
+  kiapi.common.types.Distance min_track_width          = 2;
+  kiapi.common.types.Distance min_connection_width     = 3;
+  kiapi.common.types.Distance min_annular_width        = 4;
+  kiapi.common.types.Distance min_via_diameter         = 5;
+  kiapi.common.types.Distance copper_to_hole_clearance = 6;
+  kiapi.common.types.Distance copper_to_edge_clearance = 7;
+  kiapi.common.types.Distance min_through_hole         = 8;
+  kiapi.common.types.Distance hole_to_hole             = 9;
+  kiapi.common.types.Distance min_microvia_diameter    = 10;
+  kiapi.common.types.Distance min_microvia_drill       = 11;
+  kiapi.common.types.Distance silk_clearance           = 12;
+  kiapi.common.types.Distance min_silk_text_height     = 13;
+  kiapi.common.types.Distance min_silk_text_thickness  = 14;
+}
+
+// returns BoardDesignConstraints
+message GetBoardDesignConstraints
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+}
+
+// Sets the constraints that are present in the request and leaves the others as they are,
+// then rebuilds the design rules the DRC and the router work from, as closing Board Setup
+// does.  Returns BoardDesignConstraints: every constraint as it is afterwards.
+message SetBoardDesignConstraints
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+
+  BoardDesignConstraints constraints = 2;
+}
