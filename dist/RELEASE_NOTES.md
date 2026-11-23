@@ -3,6 +3,30 @@
 Prebuilt KiCad 10 binaries with extended IPC API handlers for the
 [live-view](https://github.com/rpg32/live-view) agent tooling.
 
+**v10.0.6-ipc.9** — symbols can be placed the moment the editor opens; annotation and field placement over IPC.
+
+- **Library on demand:** symbol libraries load in the background after the
+  Schematic Editor opens (up to a minute on a busy machine). Until a library was
+  in, `CreateItems` answered "library symbol not found" about a symbol that
+  exists. It now makes sure that one library is loaded first: it waits while a
+  background worker is parsing it, otherwise loads it, as symbol linking does when
+  a schematic is opened. A real miss now says which it is: the library failed to
+  load (with the reason), or the library has no such symbol.
+- **`AnnotateSymbols`** (new, `schematic_commands.proto`): annotates as the
+  Annotate Schematic dialog does, in one undoable commit, with scope, order,
+  numbering, start number, reset and regroup options. The response lists every
+  symbol instance whose reference changed, how many are still unannotated, and
+  the errors KiCad's own annotation check reports.
+- **Field placement:** `UpdateItems` accepts a `SchematicField` on its own and
+  applies its position, visibility and text to that field of its symbol (text
+  through the same setters as a whole-symbol update). Updating the whole symbol
+  still moves its fields along and takes only their text.
+- **Project of an open schematic:** `GetOpenDocuments` now fills `project.name`
+  and `project.path` for schematics, as the board editor does, so clients can
+  tell apart same-named schematics open in different KiCad instances.
+- Regenerate client bindings from this release's protos (new messages only;
+  bindings generated from ipc.9 work against ipc.8).
+
 **v10.0.6-ipc.8** — symbols placed over IPC connect properly; junctions and global labels work.
 
 - **Body style:** `CreateItems` passed the proto default body style 0 straight

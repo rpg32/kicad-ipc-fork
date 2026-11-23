@@ -39,6 +39,9 @@
 #include <magic_enum.hpp>
 #include <sch_commit.h>
 #include <sch_edit_frame.h>
+#include <sch_reference_list.h>
+#include <sch_screen.h>
+#include <reporter.h>
 #include <wx/filename.h>
 
 #include <api/common/types/base_types.pb.h>
@@ -80,6 +83,8 @@ API_HANDLER_SCH::API_HANDLER_SCH( SCH_EDIT_FRAME* aFrame ) :
             &API_HANDLER_SCH::handleGetNets );
     registerHandler<GetSheetHierarchy, GetSheetHierarchyResponse>(
             &API_HANDLER_SCH::handleGetSheetHierarchy );
+    registerHandler<AnnotateSymbols, AnnotateSymbolsResponse>(
+            &API_HANDLER_SCH::handleAnnotateSymbols );
 }
 
 
@@ -121,6 +126,11 @@ HANDLER_RESULT<GetOpenDocumentsResponse> API_HANDLER_SCH::handleGetOpenDocuments
 
     doc.set_type( DocumentType::DOCTYPE_SCHEMATIC );
     doc.set_board_filename( fn.GetFullName() );
+
+    // The project, as the board editor reports it: with several schematics of the same
+    // file name open (one per KiCad instance), the directory is what tells them apart.
+    doc.mutable_project()->set_name( m_frame->Prj().GetProjectName().ToStdString() );
+    doc.mutable_project()->set_path( m_frame->Prj().GetProjectDirectory().ToStdString() );
 
     response.mutable_documents()->Add( std::move( doc ) );
     return response;
@@ -277,24 +287,69 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             SYMBOL_LIBRARY_ADAPTER* adapter =
                     PROJECT_SCH::SymbolLibAdapter( &m_frame->Prj() );
             LIB_SYMBOL* libSymbol = nullptr;
+            wxString    loadError;
 
             if( adapter )
             {
                 try
                 {
+                    // Libraries load in the background after the editor opens (a minute on a
+                    // busy machine). A request that arrives before its library is in was told
+                    // "library symbol not found" about a symbol that exists. Make sure that one
+                    // library is in: wait while a background worker is parsing it right now
+                    // (two parsers on one library's cache is not safe), otherwise load it here,
+                    // as symbol linking does when a schematic is opened.
+                    const wxString nickname = libId.GetLibNickname();
+
+                    for( int waited = 0; waited < 30000; waited += 20 )
+                    {
+                        std::optional<LIB_STATUS> state = adapter->GetLibraryStatus( nickname );
+
+                        if( !state || state->load_status != LOAD_STATUS::LOADING )
+                            break;
+
+                        wxMilliSleep( 20 );
+                    }
+
+                    if( !adapter->IsLibraryLoaded( nickname ) )
+                    {
+                        std::optional<LIB_STATUS> loaded = adapter->LoadOne( nickname );
+
+                        if( loaded && loaded->load_status != LOAD_STATUS::LOADED )
+                        {
+                            loadError = loaded->error ? loaded->error->message
+                                                      : wxString( wxT( "the library could not be loaded" ) );
+                        }
+                    }
+
                     libSymbol = adapter->LoadSymbol( libId );
                 }
-                catch( const IO_ERROR& )
+                catch( const IO_ERROR& ioe )
                 {
                     libSymbol = nullptr;
+                    loadError = ioe.What();
                 }
             }
 
             if( !libSymbol )
             {
                 status.set_code( ItemStatusCode::ISC_INVALID_TYPE );
-                status.set_error_message( fmt::format( "library symbol '{}' not found",
-                                                       std::string( libId.Format() ) ) );
+
+                // Say which it is: a library that failed to load, or a symbol that library
+                // does not have.
+                if( loadError.IsEmpty() )
+                {
+                    status.set_error_message( fmt::format( "library symbol '{}' not found",
+                                                           std::string( libId.Format() ) ) );
+                }
+                else
+                {
+                    status.set_error_message( fmt::format(
+                            "library symbol '{}' not found: library '{}': {}",
+                            std::string( libId.Format() ),
+                            std::string( libId.GetLibNickname() ), loadError.ToStdString() ) );
+                }
+
                 aItemHandler( status, anyItem );
                 continue;
             }
@@ -437,6 +492,89 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_SCH::handleCreateUpdateItemsIntern
             line->Serialize( newItem );
             commit->Add( line.release(), screen );
 
+            aItemHandler( status, newItem );
+            continue;
+        }
+
+        // A symbol's field updated on its own: where it sits, whether it shows, and its text.
+        // Fields are children of their symbol, not items of the screen, so they are found
+        // through the symbols.  (Updating the whole symbol moves its fields along with it and
+        // deliberately takes only their text, so there was no way to place a field.)
+        if( !aCreate && *type == SCH_FIELD_T )
+        {
+            kiapi::schematic::types::SchematicField fieldMsg;
+
+            if( !anyItem.UnpackTo( &fieldMsg ) )
+            {
+                e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+                e.set_error_message( "could not unpack SchematicField from request" );
+                return tl::unexpected( e );
+            }
+
+            const KIID  fieldId( fieldMsg.id().value() );
+            SCH_SYMBOL* owner = nullptr;
+            SCH_FIELD*  target = nullptr;
+
+            for( SCH_ITEM* candidate : screen->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                SCH_SYMBOL* candidateSymbol = static_cast<SCH_SYMBOL*>( candidate );
+
+                for( SCH_FIELD& field : candidateSymbol->GetFields() )
+                {
+                    if( field.m_Uuid == fieldId )
+                    {
+                        owner = candidateSymbol;
+                        target = &field;
+                        break;
+                    }
+                }
+
+                if( target )
+                    break;
+            }
+
+            if( !target )
+            {
+                status.set_code( ItemStatusCode::ISC_NONEXISTENT );
+                status.set_error_message( fmt::format( "no symbol on this sheet has a field with UUID {}",
+                                                       fieldId.AsStdString() ) );
+                aItemHandler( status, anyItem );
+                continue;
+            }
+
+            const SCH_SHEET_PATH& sheet = m_frame->GetCurrentSheet();
+            const wxString        variant = m_frame->Schematic().GetCurrentVariant();
+            const wxString        text = wxString::FromUTF8( fieldMsg.text() );
+
+            commit->Modify( owner, screen );
+
+            if( target->GetText() != text )
+            {
+                // Through the same setters as a whole-symbol update: reference and value live
+                // in the per-sheet instance.
+                if( target->GetId() == FIELD_T::REFERENCE )
+                    owner->SetRef( &sheet, text );
+                else if( target->GetId() == FIELD_T::VALUE )
+                    owner->SetValueFieldText( text, &sheet, variant );
+                else
+                    target->SetText( text );
+
+                owner->SyncOtherUnits( sheet, *static_cast<SCH_COMMIT*>( commit ), nullptr, variant );
+            }
+
+            if( fieldMsg.has_position() )
+            {
+                target->SetPosition( kiapi::common::UnpackVector2( fieldMsg.position() ) );
+
+                // Placed on purpose: field autoplacement must not put it back.
+                owner->SetFieldsAutoplaced( AUTOPLACE_NONE );
+            }
+
+            target->SetVisible( fieldMsg.visible() );
+
+            google::protobuf::Any newItem;
+            status.set_code( ItemStatusCode::ISC_OK );
+            target->Serialize( newItem );
             aItemHandler( status, newItem );
             continue;
         }
@@ -963,6 +1101,146 @@ API_HANDLER_SCH::handleGetSheetHierarchy(
         sheet->set_page( path.GetPageNumber().ToStdString() );
         sheet->mutable_id()->set_value( path.Last()->m_Uuid.AsStdString() );
     }
+
+    return response;
+}
+
+
+namespace
+{
+/// Collects what the annotation pass reports: errors are kept, the rest is dropped (the
+/// response lists the changed references itself).
+class ANNOTATE_API_REPORTER : public REPORTER
+{
+public:
+    REPORTER& Report( const wxString& aText, SEVERITY aSeverity = RPT_SEVERITY_UNDEFINED ) override
+    {
+        if( aSeverity == RPT_SEVERITY_ERROR )
+            m_errors.push_back( aText );
+
+        return REPORTER::Report( aText, aSeverity );
+    }
+
+    std::vector<wxString> m_errors;
+};
+
+
+/// Reference of every non-power symbol instance, keyed by sheet path + symbol id.
+struct ANNOTATION_SNAPSHOT
+{
+    struct ENTRY
+    {
+        KIID     id;
+        wxString sheet;
+        wxString ref;
+        bool     annotated;
+    };
+
+    std::map<wxString, ENTRY> entries;
+
+    explicit ANNOTATION_SNAPSHOT( SCHEMATIC& aSchematic )
+    {
+        for( const SCH_SHEET_PATH& path : aSchematic.Hierarchy() )
+        {
+            for( SCH_ITEM* item : path.LastScreen()->Items().OfType( SCH_SYMBOL_T ) )
+            {
+                SCH_SYMBOL* symbol = static_cast<SCH_SYMBOL*>( item );
+
+                if( symbol->IsPower() )
+                    continue;
+
+                wxString ref = symbol->GetRef( &path );
+
+                if( symbol->GetUnitCount() > 1 )
+                    ref << symbol->SubReference( symbol->GetUnitSelection( &path ) );
+
+                KIID_PATH key = path.Path();
+                key.push_back( symbol->m_Uuid );
+
+                entries[key.AsString()] = { symbol->m_Uuid, path.PathHumanReadable( false ), ref,
+                                            symbol->IsAnnotated( &path ) };
+            }
+        }
+    }
+};
+} // namespace
+
+
+HANDLER_RESULT<kiapi::schematic::commands::AnnotateSymbolsResponse>
+API_HANDLER_SCH::handleAnnotateSymbols(
+        const HANDLER_CONTEXT<kiapi::schematic::commands::AnnotateSymbols>& aCtx )
+{
+    using namespace kiapi::schematic::commands;
+
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    ANNOTATE_SCOPE_T scope = ANNOTATE_ALL;
+
+    switch( aCtx.Request.scope() )
+    {
+    case AnnotateScope::ASC_CURRENT_SHEET: scope = ANNOTATE_CURRENT_SHEET; break;
+    case AnnotateScope::ASC_SELECTION:     scope = ANNOTATE_SELECTION;     break;
+    default:                               scope = ANNOTATE_ALL;           break;
+    }
+
+    ANNOTATE_ORDER_T order = aCtx.Request.order() == AnnotateOrder::AOR_Y_POSITION ? SORT_BY_Y_POSITION
+                                                                                   : SORT_BY_X_POSITION;
+    ANNOTATE_ALGO_T algo = INCREMENTAL_BY_REF;
+
+    switch( aCtx.Request.numbering() )
+    {
+    case AnnotateNumbering::ANM_SHEET_X_100:  algo = SHEET_NUMBER_X_100;  break;
+    case AnnotateNumbering::ANM_SHEET_X_1000: algo = SHEET_NUMBER_X_1000; break;
+    default:                                  algo = INCREMENTAL_BY_REF;  break;
+    }
+
+    const bool reset = aCtx.Request.reset_existing();
+    const bool recursive = scope == ANNOTATE_ALL || aCtx.Request.recursive();
+    const int  startNumber = std::max( 1, aCtx.Request.start_number() );
+
+    ANNOTATION_SNAPSHOT   before( m_frame->Schematic() );
+    ANNOTATE_API_REPORTER reporter;
+    SCH_COMMIT            commit( m_frame );
+
+    // The same call, with the same fixed arguments, as the Annotate Schematic dialog makes.
+    m_frame->AnnotateSymbols( &commit, scope, order, algo, recursive, startNumber, reset,
+                              reset && aCtx.Request.regroup_units(), true, reporter,
+                              SYMBOL_FILTER_NON_POWER );
+
+    commit.Push( _( "Annotate" ) );
+
+    ANNOTATION_SNAPSHOT     after( m_frame->Schematic() );
+    AnnotateSymbolsResponse response;
+    int                     unannotated = 0;
+
+    for( const auto& [key, now] : after.entries )
+    {
+        if( !now.annotated )
+            unannotated++;
+
+        auto was = before.entries.find( key );
+
+        if( was != before.entries.end() && was->second.ref == now.ref )
+            continue;
+
+        AnnotatedSymbol* changed = response.add_changed();
+        changed->mutable_id()->set_value( now.id.AsStdString() );
+        changed->set_sheet_path( now.sheet.ToStdString() );
+        changed->set_old_reference( was != before.entries.end() ? was->second.ref.ToStdString()
+                                                                : std::string() );
+        changed->set_new_reference( now.ref.ToStdString() );
+    }
+
+    response.set_unannotated( unannotated );
+
+    for( const wxString& error : reporter.m_errors )
+        response.add_errors( error.ToStdString() );
 
     return response;
 }

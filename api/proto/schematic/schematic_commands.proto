@@ -59,3 +59,75 @@ message GetSheetHierarchyResponse
 {
   repeated SheetInfo sheets = 1;
 }
+
+// Which symbols AnnotateSymbols numbers
+enum AnnotateScope
+{
+  ASC_UNKNOWN       = 0;   // same as ASC_ALL
+  ASC_ALL           = 1;   // The whole schematic
+  ASC_CURRENT_SHEET = 2;   // The sheet shown in the editor
+  ASC_SELECTION     = 3;   // The selected symbols
+}
+
+// The order in which symbols are numbered
+enum AnnotateOrder
+{
+  AOR_UNKNOWN    = 0;   // same as AOR_X_POSITION
+  AOR_X_POSITION = 1;   // Left to right, then top to bottom
+  AOR_Y_POSITION = 2;   // Top to bottom, then left to right
+}
+
+// Which numbers are handed out
+enum AnnotateNumbering
+{
+  ANM_UNKNOWN      = 0;   // same as ANM_FIRST_FREE
+  ANM_FIRST_FREE   = 1;   // The first free number, from start_number up
+  ANM_SHEET_X_100  = 2;   // Sheet number * 100 up
+  ANM_SHEET_X_1000 = 3;   // Sheet number * 1000 up
+}
+
+// Annotates symbols exactly as the Annotate Schematic dialog does (one undoable commit).
+message AnnotateSymbols
+{
+  kiapi.common.types.DocumentSpecifier document = 1;
+  AnnotateScope     scope     = 2;
+  AnnotateOrder     order     = 3;
+  AnnotateNumbering numbering = 4;
+
+  // For ASC_CURRENT_SHEET: also annotate the sheets below it
+  bool recursive = 5;
+
+  // First number to use with ANM_FIRST_FREE (0 is taken as 1)
+  int32 start_number = 6;
+
+  // Clear existing annotation first and number everything again.  When false, only
+  // symbols without a number are annotated and existing references are kept.
+  bool reset_existing = 7;
+
+  // With reset_existing: units of multi-unit symbols may be regrouped
+  bool regroup_units = 8;
+}
+
+message AnnotatedSymbol
+{
+  kiapi.common.types.KIID id = 1;
+
+  // Human-readable path of the sheet instance this reference belongs to
+  string sheet_path = 2;
+
+  // Reference before and after, including the unit letter of multi-unit symbols
+  string old_reference = 3;
+  string new_reference = 4;
+}
+
+message AnnotateSymbolsResponse
+{
+  // Every symbol instance whose reference changed
+  repeated AnnotatedSymbol changed = 1;
+
+  // Symbol instances (power symbols excluded) still without a number afterwards
+  int32 unannotated = 2;
+
+  // Annotation errors KiCad's own check reports afterwards (duplicates, unit mismatches, ...)
+  repeated string errors = 3;
+}

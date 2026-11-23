@@ -102,6 +102,9 @@ private:
     HANDLER_RESULT<kiapi::schematic::commands::GetSheetHierarchyResponse> handleGetSheetHierarchy(
             const HANDLER_CONTEXT<kiapi::schematic::commands::GetSheetHierarchy>& aCtx );
 
+    HANDLER_RESULT<kiapi::schematic::commands::AnnotateSymbolsResponse> handleAnnotateSymbols(
+            const HANDLER_CONTEXT<kiapi::schematic::commands::AnnotateSymbols>& aCtx );
+
     SCH_EDIT_FRAME* m_frame;
 };
 
