@@ -607,6 +607,17 @@ HANDLER_RESULT<ItemRequestStatus> API_HANDLER_PCB::handleCreateUpdateItemsIntern
                 existingFp->SetReference( newFp->GetReference() );
                 existingFp->SetValue( newFp->GetValue() );
 
+                // The link to the schematic symbol.  Without it a footprint placed over the API
+                // cannot be tied to its symbol, and Update PCB from Schematic sees it as an extra
+                // footprint.  An update that carries no path leaves the link as it is, so a client
+                // that sends a partial footprint cannot clear it by accident.
+                if( !newFp->GetPath().empty() )
+                {
+                    existingFp->SetPath( newFp->GetPath() );
+                    existingFp->SetSheetname( newFp->GetSheetname() );
+                    existingFp->SetSheetfile( newFp->GetSheetfile() );
+                }
+
                 // Sync field text geometry (position + text attributes) from the
                 // incoming footprint so clients can reposition reference/value/user
                 // fields over IPC. Without this, only the field *strings* (set above)
@@ -3335,6 +3346,13 @@ HANDLER_RESULT<CreateItemsResponse> API_HANDLER_PCB::handleParseAndCreateItemsFr
         // Single item (shouldn't normally happen with wrapped parse)
         addItem( parsedItem );
     }
+
+    // A client that opened no commit gets the paste as an undo step of its own, as CreateItems
+    // does.  Left pending, the commit was pushed by that client's next write (one undo step for
+    // two unrelated changes), refused its next BeginCommit, and was reverted with the next
+    // commit it dropped.
+    if( !m_activeClients.count( aCtx.ClientName ) )
+        pushCurrentCommit( aCtx.ClientName, _( "Created items via API" ) );
 
     frame()->GetCanvas()->Refresh();
     return response;

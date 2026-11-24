@@ -3,6 +3,21 @@
 Prebuilt KiCad 10 binaries with extended IPC API handlers for the
 [live-view](https://github.com/rpg32/live-view) agent tooling.
 
+**v10.0.6-ipc.12** — two fixes for footprints placed over the API.
+
+- **Fix: a paste left its commit open.** `ParseAndCreateItemsFromString` on a board took
+  the client's commit and never closed it when the client had not opened one itself. The
+  pasted items were on the board but outside the undo history until that client's next
+  write, which then pushed both changes as one undo step; the client's next `BeginCommit`
+  was refused ("already has a commit in progress"); and a commit it dropped next took the
+  paste with it. A paste outside a `BeginCommit` is now pushed as an undo step of its
+  own, as `CreateItems` does. Inside a client's commit nothing changes.
+- **Fix: `UpdateItems` on a footprint dropped its link to the schematic symbol.** The
+  symbol path, sheet name and sheet file of the footprint in the request are now applied,
+  so a footprint placed over the API can be tied to its symbol (Update PCB from Schematic
+  otherwise sees it as an extra footprint). A request that carries no path leaves the
+  link as it is.
+
 **v10.0.6-ipc.11** — the last dialogs a client had to drive become requests, and two KiCad defects that made API edits fail are fixed.
 
 - **Fix: edits inside a footprint reached the undo copy.** Every commit copies the
