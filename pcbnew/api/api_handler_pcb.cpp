@@ -59,6 +59,15 @@
 #include <tools/pcb_actions.h>
 #include <tools/pcb_selection_tool.h>
 #include <tools/drc_tool.h>
+#include <drc/drc_rule_parser.h>
+#include <tracks_cleaner.h>
+#include <cleanup_item.h>
+#include <project/net_settings.h>
+#include <project/project_file.h>
+#include <eda_pattern_match.h>
+#include <lib_id.h>
+#include <wx/ffile.h>
+#include <wx/filename.h>
 #include <zone.h>
 #include <router/pns_router.h>
 #include <router/router_tool.h>
@@ -170,6 +179,18 @@ API_HANDLER_PCB::API_HANDLER_PCB( PCB_EDIT_FRAME* aFrame ) :
             &API_HANDLER_PCB::handleGetBoardDesignConstraints );
     registerHandler<SetBoardDesignConstraints, BoardDesignConstraints>(
             &API_HANDLER_PCB::handleSetBoardDesignConstraints );
+    registerHandler<ChangeFootprint, ChangeFootprintResponse>(
+            &API_HANDLER_PCB::handleChangeFootprint );
+    registerHandler<CleanupTracksAndVias, CleanupTracksAndViasResponse>(
+            &API_HANDLER_PCB::handleCleanupTracksAndVias );
+    registerHandler<GetCustomDesignRules, CustomDesignRulesResponse>(
+            &API_HANDLER_PCB::handleGetCustomDesignRules );
+    registerHandler<SetCustomDesignRules, CustomDesignRulesResponse>(
+            &API_HANDLER_PCB::handleSetCustomDesignRules );
+    registerHandler<GetNetClassPatterns, NetClassPatternsResponse>(
+            &API_HANDLER_PCB::handleGetNetClassPatterns );
+    registerHandler<SetNetClassPatterns, NetClassPatternsResponse>(
+            &API_HANDLER_PCB::handleSetNetClassPatterns );
 }
 
 
@@ -3552,6 +3573,52 @@ void packConstraints( BoardDesignConstraints& aOut, const BOARD_DESIGN_SETTINGS&
 } // namespace
 
 
+namespace
+{
+
+/**
+ * Rebuild the rules the DRC engine derives from the board's settings and its custom rules
+ * file, and have the router reload its design rules: what closing Board Setup does.
+ */
+void rebuildDesignRules( PCB_EDIT_FRAME* aFrame )
+{
+    try
+    {
+        if( DRC_TOOL* drcTool = aFrame->GetToolManager()->GetTool<DRC_TOOL>() )
+            drcTool->GetDRCEngine()->InitEngine( aFrame->GetDesignRulesPath() );
+    }
+    catch( PARSE_ERROR& )
+    {
+        // The board's custom rules file does not parse; that is not the request's doing.
+    }
+
+    aFrame->CallAfter( [aFrame]()
+                       {
+                           TOOL_EVENT toolEvent( TC_COMMAND, TA_MODEL_CHANGE, AS_ACTIVE );
+                           toolEvent.SetHasPosition( false );
+                           aFrame->GetToolManager()->ProcessEvent( toolEvent );
+                           aFrame->GetCanvas()->Refresh();
+                       } );
+}
+
+
+ApiResponseStatus badRequest( const std::string& aMessage )
+{
+    ApiResponseStatus e;
+    e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+    e.set_error_message( aMessage );
+    return e;
+}
+
+
+std::string utf8( const wxString& aText )
+{
+    return std::string( aText.ToUTF8().data() );
+}
+
+} // namespace
+
+
 HANDLER_RESULT<BoardDesignConstraints> API_HANDLER_PCB::handleGetBoardDesignConstraints(
         const HANDLER_CONTEXT<GetBoardDesignConstraints>& aCtx )
 {
@@ -3622,29 +3689,447 @@ HANDLER_RESULT<BoardDesignConstraints> API_HANDLER_PCB::handleSetBoardDesignCons
         // project file, written with the board), the DRC engine rebuilds the rules it derives
         // from them, and the router reloads its design rules.
         frame()->OnModify();
-
-        try
-        {
-            if( DRC_TOOL* drcTool = frame()->GetToolManager()->GetTool<DRC_TOOL>() )
-                drcTool->GetDRCEngine()->InitEngine( frame()->GetDesignRulesPath() );
-        }
-        catch( PARSE_ERROR& )
-        {
-            // The board's custom rules file does not parse; that is not this request's doing.
-        }
-
-        PCB_EDIT_FRAME* f = frame();
-
-        f->CallAfter( [f]()
-                      {
-                          TOOL_EVENT toolEvent( TC_COMMAND, TA_MODEL_CHANGE, AS_ACTIVE );
-                          toolEvent.SetHasPosition( false );
-                          f->GetToolManager()->ProcessEvent( toolEvent );
-                          f->GetCanvas()->Refresh();
-                      } );
+        rebuildDesignRules( frame() );
     }
 
     BoardDesignConstraints response;
     packConstraints( response, settings );
+    return response;
+}
+
+
+HANDLER_RESULT<ChangeFootprintResponse> API_HANDLER_PCB::handleChangeFootprint(
+        const HANDLER_CONTEXT<ChangeFootprint>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    BOARD*     board = frame()->GetBoard();
+    const KIID id( aCtx.Request.footprint().value() );
+    FOOTPRINT* existing = nullptr;
+
+    for( FOOTPRINT* footprint : board->Footprints() )
+    {
+        if( footprint->m_Uuid == id )
+        {
+            existing = footprint;
+            break;
+        }
+    }
+
+    if( !existing )
+    {
+        return tl::unexpected( badRequest( fmt::format( "the board has no footprint with id {}",
+                                                        aCtx.Request.footprint().value() ) ) );
+    }
+
+    const LIB_ID oldId = existing->GetFPID();
+    const LIB_ID newId( aCtx.Request.new_footprint().library_nickname(),
+                        aCtx.Request.new_footprint().entry_name() );
+
+    FOOTPRINT* replacement = frame()->LoadFootprint( newId );
+
+    if( !replacement )
+    {
+        return tl::unexpected( badRequest( fmt::format(
+                "library footprint {}:{} was not found in the footprint library table; "
+                "nothing was changed",
+                aCtx.Request.new_footprint().library_nickname(),
+                aCtx.Request.new_footprint().entry_name() ) ) );
+    }
+
+    // The nets the old pads are on, to say afterwards which connections the change dropped.
+    std::vector<std::pair<wxString, wxString>> oldPadNets;
+
+    for( PAD* pad : existing->Pads() )
+    {
+        if( pad->IsOnCopperLayer() && pad->GetNetCode() > 0 )
+            oldPadNets.emplace_back( pad->GetNumber(), pad->GetNetname() );
+    }
+
+    ChangeFootprintResponse response;
+    response.set_reference( utf8( existing->GetReference() ) );
+    response.mutable_old_footprint()->set_library_nickname( oldId.GetLibNickname() );
+    response.mutable_old_footprint()->set_entry_name( oldId.GetLibItemName() );
+
+    // The footprint being replaced must not stay in the selection.
+    frame()->GetToolManager()->RunAction( ACTIONS::selectionClear );
+
+    BOARD_COMMIT commit( frame() );
+
+    // The Change Footprint dialog's default options.
+    frame()->ExchangeFootprint( existing, replacement, commit,
+                                false /* deleteExtraTexts */,
+                                true  /* resetTextLayers */,
+                                true  /* resetTextEffects */,
+                                true  /* resetTextPositions */,
+                                true  /* resetTextContent */,
+                                true  /* resetFabricationAttrs */,
+                                true  /* resetClearanceOverrides */,
+                                true  /* reset3DModels */ );
+
+    commit.Push( _( "Change Footprint" ) );
+
+    response.mutable_footprint()->set_value( replacement->m_Uuid.AsStdString() );
+    response.mutable_new_footprint()->set_library_nickname( replacement->GetFPID().GetLibNickname() );
+    response.mutable_new_footprint()->set_entry_name( replacement->GetFPID().GetLibItemName() );
+
+    std::set<std::pair<wxString, wxString>> nowConnected;
+
+    for( PAD* pad : replacement->Pads() )
+    {
+        if( !pad->IsOnCopperLayer() )
+            continue;
+
+        FootprintPadNet* padNet = response.add_pads();
+        padNet->set_number( utf8( pad->GetNumber() ) );
+
+        if( pad->GetNetCode() > 0 )
+        {
+            padNet->set_net( utf8( pad->GetNetname() ) );
+            nowConnected.emplace( pad->GetNumber(), pad->GetNetname() );
+        }
+    }
+
+    for( const std::pair<wxString, wxString>& old : oldPadNets )
+    {
+        if( nowConnected.count( old ) )
+            continue;
+
+        FootprintPadNet* padNet = response.add_disconnected();
+        padNet->set_number( utf8( old.first ) );
+        padNet->set_net( utf8( old.second ) );
+    }
+
+    frame()->GetCanvas()->Refresh();
+    return response;
+}
+
+
+HANDLER_RESULT<CleanupTracksAndViasResponse> API_HANDLER_PCB::handleCleanupTracksAndVias(
+        const HANDLER_CONTEXT<CleanupTracksAndVias>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    const CleanupTracksAndVias& request = aCtx.Request;
+    BOARD*                      board = frame()->GetBoard();
+    int                         netFilter = -1;
+
+    if( !request.net().empty() )
+    {
+        NETINFO_ITEM* net = board->FindNet( wxString::FromUTF8( request.net() ) );
+
+        if( !net )
+        {
+            return tl::unexpected( badRequest( fmt::format( "the board has no net named '{}'",
+                                                            request.net() ) ) );
+        }
+
+        netFilter = net->GetNetCode();
+    }
+
+    // What each track and via is, taken before the cleanup removes any of them.
+    struct TRACK_FACTS
+    {
+        bool     isVia;
+        wxString net;
+        wxString layer;
+        VECTOR2I start;
+        VECTOR2I end;
+    };
+
+    std::map<KIID, TRACK_FACTS> facts;
+
+    for( PCB_TRACK* track : board->Tracks() )
+    {
+        const bool isVia = track->Type() == PCB_VIA_T;
+
+        facts[track->m_Uuid] = { isVia, track->GetNetname(),
+                                 isVia ? wxString() : board->GetLayerName( track->GetLayer() ),
+                                 track->GetStart(), isVia ? track->GetStart() : track->GetEnd() };
+    }
+
+    if( !request.dry_run() )
+        frame()->GetToolManager()->RunAction( ACTIONS::selectionClear );
+
+    frame()->Compile_Ratsnest( false );
+
+    BOARD_COMMIT   commit( frame() );
+    TRACKS_CLEANER cleaner( board, commit );
+
+    // The filter says which items to leave alone.
+    cleaner.SetFilter(
+            [netFilter]( BOARD_CONNECTED_ITEM* aItem ) -> bool
+            {
+                return netFilter >= 0 && aItem->GetNetCode() != netFilter;
+            } );
+
+    std::vector<std::shared_ptr<CLEANUP_ITEM>> items;
+
+    cleaner.CleanupBoard( request.dry_run(), &items,
+                          request.remove_shorting_tracks(),
+                          request.remove_redundant_vias(),
+                          request.merge_collinear_tracks(),
+                          request.remove_dangling_tracks(),
+                          request.remove_tracks_in_pads(),
+                          request.remove_dangling_vias(),
+                          nullptr );
+
+    CleanupTracksAndViasResponse response;
+
+    for( const std::shared_ptr<CLEANUP_ITEM>& item : items )
+    {
+        CleanupItem* out = response.add_items();
+        out->set_kind( utf8( item->GetErrorText( item->GetErrorCode(), false ) ) );
+        out->mutable_id()->set_value( item->GetMainItemID().AsStdString() );
+
+        if( auto it = facts.find( item->GetMainItemID() ); it != facts.end() )
+        {
+            out->set_is_via( it->second.isVia );
+            out->set_net( utf8( it->second.net ) );
+            out->set_layer( utf8( it->second.layer ) );
+            kiapi::common::PackVector2( *out->mutable_start(), it->second.start );
+            kiapi::common::PackVector2( *out->mutable_end(), it->second.end );
+        }
+    }
+
+    if( !request.dry_run() && !commit.Empty() )
+    {
+        commit.Push( _( "Board Cleanup" ) );
+        frame()->GetCanvas()->Refresh( true );
+        response.set_changed( true );
+    }
+
+    return response;
+}
+
+
+namespace
+{
+
+/**
+ * Fill the response from the board's rules file as it is on disk.
+ */
+void packCustomRules( CustomDesignRulesResponse& aResponse, PCB_EDIT_FRAME* aFrame )
+{
+    wxFileName rulesFile( aFrame->GetDesignRulesPath() );
+
+    aResponse.set_path( utf8( rulesFile.GetFullPath() ) );
+
+    if( !rulesFile.FileExists() )
+        return;
+
+    wxFFile  file( rulesFile.GetFullPath(), wxT( "rb" ) );
+    wxString text;
+
+    if( !file.IsOpened() || !file.ReadAll( &text, wxConvUTF8 ) )
+        return;
+
+    aResponse.set_exists( true );
+    aResponse.set_text( utf8( text ) );
+
+    try
+    {
+        std::vector<std::shared_ptr<DRC_RULE>> rules;
+        DRC_RULES_PARSER                       parser( text, rulesFile.GetFullPath() );
+
+        parser.Parse( rules, nullptr );
+        aResponse.set_rule_count( static_cast<int>( rules.size() ) );
+    }
+    catch( PARSE_ERROR& )
+    {
+        // A rules file that does not parse defines no rules.
+    }
+}
+
+} // namespace
+
+
+HANDLER_RESULT<CustomDesignRulesResponse> API_HANDLER_PCB::handleGetCustomDesignRules(
+        const HANDLER_CONTEXT<GetCustomDesignRules>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    CustomDesignRulesResponse response;
+    packCustomRules( response, frame() );
+    return response;
+}
+
+
+HANDLER_RESULT<CustomDesignRulesResponse> API_HANDLER_PCB::handleSetCustomDesignRules(
+        const HANDLER_CONTEXT<SetCustomDesignRules>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    if( frame()->Prj().IsNullProject() )
+        return tl::unexpected( badRequest( "design rules cannot be set without a project" ) );
+
+    const wxString text = wxString::FromUTF8( aCtx.Request.text() );
+    const wxString path = frame()->GetDesignRulesPath();
+
+    if( text.IsEmpty() )
+    {
+        if( wxFileExists( path ) && !wxRemoveFile( path ) )
+            return tl::unexpected( badRequest( "could not remove " + utf8( path ) ) );
+    }
+    else
+    {
+        // Check before writing: with no reporter the parser throws at the first error.
+        try
+        {
+            std::vector<std::shared_ptr<DRC_RULE>> rules;
+            DRC_RULES_PARSER                       parser( text, wxT( "DRC rules" ) );
+
+            parser.Parse( rules, nullptr );
+        }
+        catch( PARSE_ERROR& pe )
+        {
+            return tl::unexpected( badRequest( fmt::format(
+                    "the rules do not parse: line {}, column {}: {}; nothing was written",
+                    pe.lineNumber, pe.byteIndex, utf8( pe.ParseProblem() ) ) ) );
+        }
+
+        wxFFile file( path, wxT( "wb" ) );
+
+        if( !file.IsOpened() || !file.Write( text, wxConvUTF8 ) )
+            return tl::unexpected( badRequest( "could not write " + utf8( path ) ) );
+    }
+
+    rebuildDesignRules( frame() );
+
+    CustomDesignRulesResponse response;
+    packCustomRules( response, frame() );
+    return response;
+}
+
+
+namespace
+{
+
+void packNetClassPatterns( NetClassPatternsResponse& aResponse, NET_SETTINGS& aSettings )
+{
+    for( const auto& [matcher, netClass] : aSettings.GetNetclassPatternAssignments() )
+    {
+        NetClassPattern* pattern = aResponse.add_patterns();
+        pattern->set_pattern( utf8( matcher->GetPattern() ) );
+        pattern->set_net_class( utf8( netClass ) );
+    }
+}
+
+} // namespace
+
+
+HANDLER_RESULT<NetClassPatternsResponse> API_HANDLER_PCB::handleGetNetClassPatterns(
+        const HANDLER_CONTEXT<GetNetClassPatterns>& aCtx )
+{
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    NetClassPatternsResponse response;
+    packNetClassPatterns( response, *frame()->Prj().GetProjectFile().m_NetSettings );
+    return response;
+}
+
+
+HANDLER_RESULT<NetClassPatternsResponse> API_HANDLER_PCB::handleSetNetClassPatterns(
+        const HANDLER_CONTEXT<SetNetClassPatterns>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    if( HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.board() );
+        !documentValidation )
+    {
+        return tl::unexpected( documentValidation.error() );
+    }
+
+    NET_SETTINGS& settings = *frame()->Prj().GetProjectFile().m_NetSettings;
+
+    // Check everything before changing anything.
+    for( const NetClassPattern& pattern : aCtx.Request.patterns() )
+    {
+        const wxString netClass = wxString::FromUTF8( pattern.net_class() );
+
+        if( pattern.pattern().empty() )
+            return tl::unexpected( badRequest( "an empty pattern; nothing was changed" ) );
+
+        if( netClass != NETCLASS::Default && !settings.HasNetclass( netClass ) )
+        {
+            return tl::unexpected( badRequest( fmt::format(
+                    "there is no net class named '{}' (pattern '{}'); nothing was changed",
+                    pattern.net_class(), pattern.pattern() ) ) );
+        }
+    }
+
+    // The assignments in order: those kept from before, then the request's.
+    std::vector<std::pair<wxString, wxString>> wanted;
+
+    if( aCtx.Request.merge_mode() != kiapi::common::types::MapMergeMode::MMM_REPLACE )
+    {
+        for( const auto& [matcher, netClass] : settings.GetNetclassPatternAssignments() )
+            wanted.emplace_back( matcher->GetPattern(), netClass );
+    }
+
+    for( const NetClassPattern& pattern : aCtx.Request.patterns() )
+    {
+        const wxString text = wxString::FromUTF8( pattern.pattern() );
+        const wxString netClass = wxString::FromUTF8( pattern.net_class() );
+        bool           found = false;
+
+        for( std::pair<wxString, wxString>& existing : wanted )
+        {
+            if( existing.first == text )
+            {
+                existing.second = netClass;
+                found = true;
+                break;
+            }
+        }
+
+        if( !found )
+            wanted.emplace_back( text, netClass );
+    }
+
+    settings.ClearNetclassPatternAssignments();
+
+    for( const std::pair<wxString, wxString>& assignment : wanted )
+        settings.SetNetclassPatternAssignment( assignment.first, assignment.second );
+
+    // What closing Board Setup does for the net classes page.
+    settings.ClearAllCaches();
+    frame()->GetBoard()->SynchronizeNetsAndNetClasses( true );
+    frame()->Prj().IncrementNetclassesTicker();
+    frame()->OnModify();
+    rebuildDesignRules( frame() );
+
+    NetClassPatternsResponse response;
+    packNetClassPatterns( response, settings );
     return response;
 }

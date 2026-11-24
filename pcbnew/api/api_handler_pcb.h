@@ -169,6 +169,24 @@ private:
     HANDLER_RESULT<BoardDesignConstraints> handleSetBoardDesignConstraints(
             const HANDLER_CONTEXT<SetBoardDesignConstraints>& aCtx );
 
+    HANDLER_RESULT<ChangeFootprintResponse> handleChangeFootprint(
+            const HANDLER_CONTEXT<ChangeFootprint>& aCtx );
+
+    HANDLER_RESULT<CleanupTracksAndViasResponse> handleCleanupTracksAndVias(
+            const HANDLER_CONTEXT<CleanupTracksAndVias>& aCtx );
+
+    HANDLER_RESULT<CustomDesignRulesResponse> handleGetCustomDesignRules(
+            const HANDLER_CONTEXT<GetCustomDesignRules>& aCtx );
+
+    HANDLER_RESULT<CustomDesignRulesResponse> handleSetCustomDesignRules(
+            const HANDLER_CONTEXT<SetCustomDesignRules>& aCtx );
+
+    HANDLER_RESULT<NetClassPatternsResponse> handleGetNetClassPatterns(
+            const HANDLER_CONTEXT<GetNetClassPatterns>& aCtx );
+
+    HANDLER_RESULT<NetClassPatternsResponse> handleSetNetClassPatterns(
+            const HANDLER_CONTEXT<SetNetClassPatterns>& aCtx );
+
     HANDLER_RESULT<commands::SavedDocumentResponse> handleSaveDocumentToString(
                 const HANDLER_CONTEXT<commands::SaveDocumentToString>& aCtx );
 

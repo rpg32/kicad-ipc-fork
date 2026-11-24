@@ -3,6 +3,37 @@
 Prebuilt KiCad 10 binaries with extended IPC API handlers for the
 [live-view](https://github.com/rpg32/live-view) agent tooling.
 
+**v10.0.6-ipc.11** — the last dialogs a client had to drive become requests, and two KiCad defects that made API edits fail are fixed.
+
+- **Fix: edits inside a footprint reached the undo copy.** Every commit copies the
+  footprint it changes as its undo image; the copy still names the board as its parent,
+  and `FOOTPRINT::Add` entered the copy's pads, fields and graphics into the board's
+  item-by-id cache in place of the live ones. After the first change inside a footprint,
+  `GetItemsById` returned stale items for its other children and `UpdateItems` on them
+  answered OK while changing nothing on the board (for example: teardrops or nets set on
+  the pads of one footprint landed on the first pad only). The cache now takes children
+  only from a footprint that is itself indexed on the board.
+- **Fix: `SetNetClasses` ended the editor.** Deserializing a net class emptied its list of
+  constituent classes, and the next lookup of the class name read past the end of it. An
+  explicit net class is its own single constituent, as its constructor sets it up.
+- **`ChangeFootprint`** (new, `board_commands.proto`): change one footprint to another
+  library footprint, as the Change Footprint dialog does with its default options. Same
+  place, side and angle; reference, value, id and the pads' nets are kept. The response
+  lists the pads' nets and any connection the new footprint has no pad for.
+- **`CleanupTracksAndVias`** (new): Tools > Cleanup Tracks and Vias with the dialog's
+  options, an optional net filter and a dry run; returns each finding with its place.
+- **`GetCustomDesignRules` / `SetCustomDesignRules`** (new): the board's `.kicad_dru`.
+  Setting checks that the text parses first (a syntax error is refused with its line and
+  column, and nothing is written), writes the file and rebuilds the rules the DRC and the
+  router work from.
+- **`GetNetClassPatterns` / `SetNetClassPatterns`** (new): which nets belong to which net
+  class, by pattern. Setting also applies the net classes to the board's nets and rebuilds
+  the design rules, as closing Board Setup does; send it after `SetNetClasses` to make
+  changed classes take effect on an open board.
+- **`GetTitleBlockInfo` / `SetTitleBlockInfo` in the Schematic Editor** (the board had
+  them): the title block of the sheet shown. Before, the schematic answered "no handler".
+- Regenerate client bindings from this release's protos (new messages only).
+
 **v10.0.6-ipc.10** — KiCad's own geometry for a schematic sheet, changing a symbol and the board's design constraints over IPC.
 
 - **`GetSheetGeometry`** (new, `schematic_commands.proto`): for the sheet shown, each

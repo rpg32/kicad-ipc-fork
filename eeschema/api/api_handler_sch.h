@@ -108,6 +108,12 @@ private:
     HANDLER_RESULT<kiapi::schematic::commands::GetSheetGeometryResponse> handleGetSheetGeometry(
             const HANDLER_CONTEXT<kiapi::schematic::commands::GetSheetGeometry>& aCtx );
 
+    HANDLER_RESULT<kiapi::common::types::TitleBlockInfo> handleGetTitleBlockInfo(
+            const HANDLER_CONTEXT<commands::GetTitleBlockInfo>& aCtx );
+
+    HANDLER_RESULT<google::protobuf::Empty> handleSetTitleBlockInfo(
+            const HANDLER_CONTEXT<commands::SetTitleBlockInfo>& aCtx );
+
     SCH_EDIT_FRAME* m_frame;
 };
 

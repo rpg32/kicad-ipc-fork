@@ -90,6 +90,9 @@ API_HANDLER_SCH::API_HANDLER_SCH( SCH_EDIT_FRAME* aFrame ) :
             &API_HANDLER_SCH::handleAnnotateSymbols );
     registerHandler<GetSheetGeometry, GetSheetGeometryResponse>(
             &API_HANDLER_SCH::handleGetSheetGeometry );
+    registerHandler<GetTitleBlockInfo, kiapi::common::types::TitleBlockInfo>(
+            &API_HANDLER_SCH::handleGetTitleBlockInfo );
+    registerHandler<SetTitleBlockInfo, Empty>( &API_HANDLER_SCH::handleSetTitleBlockInfo );
 }
 
 
@@ -1439,4 +1442,79 @@ API_HANDLER_SCH::handleGetSheetGeometry(
     }
 
     return response;
+}
+
+
+// The title block of the sheet shown.  Each sheet of a schematic has its own.
+HANDLER_RESULT<kiapi::common::types::TitleBlockInfo> API_HANDLER_SCH::handleGetTitleBlockInfo(
+        const HANDLER_CONTEXT<commands::GetTitleBlockInfo>& aCtx )
+{
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    const TITLE_BLOCK&                   block = m_frame->GetScreen()->GetTitleBlock();
+    kiapi::common::types::TitleBlockInfo response;
+
+    response.set_title( block.GetTitle().ToUTF8() );
+    response.set_date( block.GetDate().ToUTF8() );
+    response.set_revision( block.GetRevision().ToUTF8() );
+    response.set_company( block.GetCompany().ToUTF8() );
+    response.set_comment1( block.GetComment( 0 ).ToUTF8() );
+    response.set_comment2( block.GetComment( 1 ).ToUTF8() );
+    response.set_comment3( block.GetComment( 2 ).ToUTF8() );
+    response.set_comment4( block.GetComment( 3 ).ToUTF8() );
+    response.set_comment5( block.GetComment( 4 ).ToUTF8() );
+    response.set_comment6( block.GetComment( 5 ).ToUTF8() );
+    response.set_comment7( block.GetComment( 6 ).ToUTF8() );
+    response.set_comment8( block.GetComment( 7 ).ToUTF8() );
+    response.set_comment9( block.GetComment( 8 ).ToUTF8() );
+
+    return response;
+}
+
+
+HANDLER_RESULT<Empty> API_HANDLER_SCH::handleSetTitleBlockInfo(
+        const HANDLER_CONTEXT<commands::SetTitleBlockInfo>& aCtx )
+{
+    if( std::optional<ApiResponseStatus> busy = checkForBusy() )
+        return tl::unexpected( *busy );
+
+    HANDLER_RESULT<bool> documentValidation = validateDocument( aCtx.Request.document() );
+
+    if( !documentValidation )
+        return tl::unexpected( documentValidation.error() );
+
+    if( !aCtx.Request.has_title_block() )
+    {
+        ApiResponseStatus e;
+        e.set_status( ApiStatusCode::AS_BAD_REQUEST );
+        e.set_error_message( "SetTitleBlockInfo requires title_block" );
+        return tl::unexpected( e );
+    }
+
+    const kiapi::common::types::TitleBlockInfo& request = aCtx.Request.title_block();
+    SCH_SCREEN*                                 screen = m_frame->GetScreen();
+    TITLE_BLOCK                                 block = screen->GetTitleBlock();
+
+    block.SetTitle( wxString::FromUTF8( request.title() ) );
+    block.SetDate( wxString::FromUTF8( request.date() ) );
+    block.SetRevision( wxString::FromUTF8( request.revision() ) );
+    block.SetCompany( wxString::FromUTF8( request.company() ) );
+    block.SetComment( 0, wxString::FromUTF8( request.comment1() ) );
+    block.SetComment( 1, wxString::FromUTF8( request.comment2() ) );
+    block.SetComment( 2, wxString::FromUTF8( request.comment3() ) );
+    block.SetComment( 3, wxString::FromUTF8( request.comment4() ) );
+    block.SetComment( 4, wxString::FromUTF8( request.comment5() ) );
+    block.SetComment( 5, wxString::FromUTF8( request.comment6() ) );
+    block.SetComment( 6, wxString::FromUTF8( request.comment7() ) );
+    block.SetComment( 7, wxString::FromUTF8( request.comment8() ) );
+    block.SetComment( 8, wxString::FromUTF8( request.comment9() ) );
+
+    screen->SetTitleBlock( block );
+    m_frame->OnModify();
+    m_frame->HardRedraw();
+
+    return Empty();
 }

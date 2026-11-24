@@ -223,7 +223,10 @@ bool NETCLASS::Deserialize( const kiapi::common::project::NetClass& nc )
     if( nc.type() == project::NCT_IMPLICIT )
         return false;
 
-    SetConstituentNetclasses( {} );
+    // An explicit net class is its own single constituent, as the constructor sets it up.
+    // With the list emptied here, GetName() and the effective-netclass code read
+    // constituent 0 of none, which ends the editor the next time the class is looked up.
+    SetConstituentNetclasses( { this } );
 
     if( nc.board().has_clearance() )
         m_Clearance = nc.board().clearance().value_nm();

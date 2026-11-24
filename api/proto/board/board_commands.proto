@@ -629,3 +629,163 @@ message SetBoardDesignConstraints
 
   BoardDesignConstraints constraints = 2;
 }
+
+
+// ── Change a footprint to another library footprint ─────────────────────────────────────
+
+// What the Change Footprint dialog does for one footprint, with the dialog's default
+// options: the footprint is replaced by the library footprint, at the same place, side
+// and angle; reference, value and the footprint's id stay; each pad takes the net of the
+// pad it replaces (matched by number).  Returns ChangeFootprintResponse.
+message ChangeFootprint
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+
+  kiapi.common.types.KIID footprint = 2;
+
+  // Looked up in the project's footprint library table.
+  kiapi.common.types.LibraryIdentifier new_footprint = 3;
+}
+
+message FootprintPadNet
+{
+  string number = 1;
+  string net    = 2;
+}
+
+message ChangeFootprintResponse
+{
+  kiapi.common.types.KIID footprint = 1;
+
+  string reference = 2;
+
+  kiapi.common.types.LibraryIdentifier old_footprint = 3;
+
+  kiapi.common.types.LibraryIdentifier new_footprint = 4;
+
+  // The copper pads of the footprint as it is now, with the net each is on ("" for none).
+  repeated FootprintPadNet pads = 5;
+
+  // Pads of the old footprint that were on a net which no pad of that number carries now.
+  repeated FootprintPadNet disconnected = 6;
+}
+
+
+// ── Cleanup Tracks and Vias ─────────────────────────────────────────────────────────────
+
+// What Tools > Cleanup Tracks and Vias does.  With dry_run nothing is changed and the
+// response lists what would be.  Returns CleanupTracksAndViasResponse.
+message CleanupTracksAndVias
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+
+  bool dry_run = 2;
+
+  // The dialog's checkboxes.
+  bool remove_shorting_tracks  = 3;   // tracks that connect two different nets
+  bool remove_redundant_vias   = 4;   // vias on a through-hole pad or on another via
+  bool merge_collinear_tracks  = 5;   // also removes zero-length and duplicate tracks
+  bool remove_dangling_tracks  = 6;   // tracks with an end connected to nothing
+  bool remove_tracks_in_pads   = 7;   // tracks that start and end inside one pad
+  bool remove_dangling_vias    = 8;   // vias connected on one layer only
+
+  // If not empty, only tracks and vias of this net are looked at.
+  string net = 9;
+}
+
+message CleanupItem
+{
+  // KiCad's name for the finding, untranslated, e.g. "Remove track not connected at both ends"
+  string kind = 1;
+
+  kiapi.common.types.KIID id = 2;
+
+  bool is_via = 3;
+
+  string net = 4;
+
+  string layer = 5;
+
+  kiapi.common.types.Vector2 start = 6;
+
+  // Equal to start for a via.
+  kiapi.common.types.Vector2 end = 7;
+}
+
+message CleanupTracksAndViasResponse
+{
+  repeated CleanupItem items = 1;
+
+  // False for a dry run, and when there was nothing to clean up.
+  bool changed = 2;
+}
+
+
+// ── Custom design rules (the board's .kicad_dru file) ───────────────────────────────────
+
+// returns CustomDesignRulesResponse
+message GetCustomDesignRules
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+}
+
+// Checks that the text parses, writes it to the board's rules file and rebuilds the rules
+// the DRC and the router work from, as the Custom Rules page of Board Setup does.  A text
+// that does not parse is refused with the line and column of the error; nothing is written.
+// An empty text removes the rules file.  Returns CustomDesignRulesResponse.
+message SetCustomDesignRules
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+
+  string text = 2;
+}
+
+message CustomDesignRulesResponse
+{
+  // The rules file of the board, whether it exists or not.
+  string path = 1;
+
+  bool exists = 2;
+
+  string text = 3;
+
+  // The number of rules the text defines.
+  int32 rule_count = 4;
+}
+
+
+// ── Net class assignments by pattern ────────────────────────────────────────────────────
+
+message NetClassPattern
+{
+  // A net name, or a pattern with wildcards or a regular expression, as in Board Setup.
+  string pattern = 1;
+
+  string net_class = 2;
+}
+
+// returns NetClassPatternsResponse
+message GetNetClassPatterns
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+}
+
+// Sets the pattern assignments (MMM_REPLACE: these and no others; MMM_MERGE: a pattern
+// already assigned changes its class, a new one is added), then applies the net classes to
+// the board's nets and rebuilds the rules the DRC and the router work from, as closing
+// Board Setup does.  Send it with no patterns and MMM_MERGE after SetNetClasses to make
+// changed classes take effect on an open board.  A pattern for a class that does not exist
+// is refused; nothing is changed.  Returns NetClassPatternsResponse.
+message SetNetClassPatterns
+{
+  kiapi.common.types.DocumentSpecifier board = 1;
+
+  repeated NetClassPattern patterns = 2;
+
+  kiapi.common.types.MapMergeMode merge_mode = 3;
+}
+
+message NetClassPatternsResponse
+{
+  repeated NetClassPattern patterns = 1;
+}

@@ -1471,9 +1471,17 @@ void FOOTPRINT::Add( BOARD_ITEM* aBoardItem, ADD_MODE aMode, bool aSkipConnectiv
     aBoardItem->ClearEditFlags();
     aBoardItem->SetParent( this );
 
-    // If this footprint is on a board, update the board's item-by-id cache
+    // If this footprint is on a board, update the board's item-by-id cache.  "On a board" means
+    // indexed there, as Remove() below checks: a copy of a footprint still names the board as
+    // its parent, and every commit makes such a copy as its undo image.  Caching the copy's
+    // children replaced the live footprint's children in the cache, so after the first change
+    // inside a footprint, lookups by id (and API updates) for its other children reached the
+    // undo image instead of the board.
     if( BOARD* board = GetBoard() )
-        board->CacheItemSubtreeById( aBoardItem );
+    {
+        if( board->IsItemIndexedById( this ) )
+            board->CacheItemSubtreeById( aBoardItem );
+    }
 
     InvalidateGeometryCaches();
 }
